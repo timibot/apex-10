@@ -1,15 +1,21 @@
 """
-Fetches xG data from Understat.
-Understat has no public API — we scrape the JSON embedded in page HTML.
-Data is fetched async to avoid blocking on 5 seasons × N teams.
+Fetches xG data from Understat using Playwright headless browser.
+Understat now requires full JS rendering — httpx/requests get empty data.
+
+Flow:
+  1. Launch headless Chromium via Playwright
+  2. Navigate to Understat league page
+  3. Wait for JS to render and inject data variables
+  4. Extract datesData from the page context
+  5. Parse and normalise xG records
+
+Rate-limited: 5-second wait between page loads.
 """
 from __future__ import annotations
 
 import json
 import logging
-import re
-
-import httpx
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +29,13 @@ UNDERSTAT_LEAGUE_SLUGS = {
     "Ligue 1": "Ligue_1",
 }
 
+REQUEST_DELAY = 5.0
+
 
 def fetch_league_xg(league_name: str, season_year: int) -> list[dict] | None:
     """
     Fetch all match xG data for a league/season from Understat.
+    Uses Playwright headless browser to render the JS-heavy page.
     Returns list of match dicts with home_xg, away_xg, or None on failure.
     """
     slug = UNDERSTAT_LEAGUE_SLUGS.get(league_name)
@@ -37,37 +46,56 @@ def fetch_league_xg(league_name: str, season_year: int) -> list[dict] | None:
     url = f"{UNDERSTAT_BASE}/league/{slug}/{season_year}"
     logger.info(f"Fetching Understat xG: {url}")
 
+    time.sleep(REQUEST_DELAY)
+
     try:
-        with httpx.Client(timeout=30.0, headers={"User-Agent": "Mozilla/5.0"}) as client:
-            response = client.get(url)
-            response.raise_for_status()
-    except httpx.HTTPError as e:
-        logger.error(f"Understat fetch failed: {e}")
-        return None
-
-    return _parse_xg_from_html(response.text)
-
-
-def _parse_xg_from_html(html: str) -> list[dict] | None:
-    """
-    Extract the datesData JSON blob embedded in Understat page HTML.
-    Understat embeds data as: var datesData = JSON.parse('...')
-    """
-    pattern = r"var datesData\s*=\s*JSON\.parse\('(.+?)'\)"
-    match = re.search(pattern, html)
-    if not match:
-        logger.error("Could not find datesData in Understat HTML")
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logger.error(
+            "Playwright not installed. Run: pip install playwright && playwright install chromium"
+        )
         return None
 
     try:
-        # Understat escapes unicode — decode it
-        raw_json = match.group(1).encode().decode("unicode_escape")
-        data = json.loads(raw_json)
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        logger.error(f"Failed to parse Understat JSON: {e}")
-        return None
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle", timeout=30000)
 
-    return _normalise_xg_records(data)
+            # Wait for Understat to inject data into the DOM
+            page.wait_for_timeout(3000)
+
+            # Extract datesData from the page's JS context
+            data = page.evaluate("""
+                () => {
+                    // Try multiple known variable names
+                    if (typeof datesData !== 'undefined') return datesData;
+                    if (typeof matchesData !== 'undefined') return matchesData;
+
+                    // Fallback: search script tags for JSON.parse patterns
+                    const scripts = document.querySelectorAll('script');
+                    for (const s of scripts) {
+                        const text = s.textContent;
+                        const match = text.match(/var\\s+datesData\\s*=\\s*JSON\\.parse\\('(.+?)'\\)/);
+                        if (match) {
+                            return JSON.parse(match[1].replace(/\\\\x/g, (m) => m));
+                        }
+                    }
+                    return null;
+                }
+            """)
+
+            browser.close()
+
+            if not data:
+                logger.error("Could not extract datesData from Understat page")
+                return None
+
+            return _normalise_xg_records(data)
+
+    except Exception as e:
+        logger.error(f"Playwright Understat fetch failed: {e}")
+        return None
 
 
 def _normalise_xg_records(data: list[dict]) -> list[dict]:
@@ -89,6 +117,7 @@ def _normalise_xg_records(data: list[dict]) -> list[dict]:
             })
         except (KeyError, ValueError, TypeError) as e:
             logger.warning(f"Skipping Understat record: {e}")
+    logger.info(f"Parsed {len(records)} xG records from Understat")
     return records
 
 

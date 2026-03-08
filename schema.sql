@@ -42,12 +42,18 @@ CREATE TABLE IF NOT EXISTS league_rho (
 CREATE TABLE IF NOT EXISTS historical_odds (
   id BIGSERIAL PRIMARY KEY,
   api_match_id INTEGER REFERENCES matches(api_match_id),
+  league VARCHAR(50),
+  season INTEGER,
+  home_team VARCHAR(100),
+  away_team VARCHAR(100),
+  match_date VARCHAR(20),
   bookmaker VARCHAR(50),
   market VARCHAR(30),        -- 1X2 | over_2.5 | btts | etc.
   odds_home FLOAT,
   odds_draw FLOAT,
   odds_away FLOAT,
   opening_odds_home FLOAT,
+  opening_odds_draw FLOAT,
   opening_odds_away FLOAT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );

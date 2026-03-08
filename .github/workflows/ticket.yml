@@ -1,0 +1,29 @@
+# ─── Phase 4: weekly Thursday ticket generation ──
+name: Ticket
+
+on:
+  schedule:
+    - cron: "30 6 * * 4"   # Every Thursday at 06:30 UTC (after cache)
+  workflow_dispatch:
+
+jobs:
+  ticket:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Generate ticket
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python -m apex10.ticket.ticket

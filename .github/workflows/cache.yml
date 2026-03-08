@@ -1,0 +1,38 @@
+name: Weekly Data Cache
+
+on:
+  schedule:
+    - cron: "0 6 * * 4"   # Every Thursday at 06:00 UTC
+  workflow_dispatch:        # Manual trigger for backfill runs
+
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+
+    env:
+      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - run: pip install -r requirements.txt
+
+      - name: Run data backfill
+        run: python -m apex10.cache.cache
+
+      - name: Notify Discord on failure
+        if: failure()
+        run: |
+          curl -H "Content-Type: application/json" \
+            -d '{"content": "⚠️ APEX-10 cache.py FAILED — check GitHub Actions logs"}' \
+            $DISCORD_WEBHOOK

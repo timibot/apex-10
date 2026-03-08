@@ -1,0 +1,44 @@
+name: CI — Lint + Test
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    env:
+      # Test values — real secrets injected for integration tests
+      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
+      SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.TEST_SUPABASE_KEY }}
+      DISCORD_WEBHOOK: ""  # Not needed in CI
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint with ruff
+        run: ruff check apex10/ tests/
+
+      - name: Run tests with coverage
+        run: pytest --cov=apex10 --cov-report=xml --cov-fail-under=80
+
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false

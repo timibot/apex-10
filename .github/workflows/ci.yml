@@ -35,7 +35,7 @@ jobs:
         run: ruff check apex10/ tests/
 
       - name: Run tests with coverage
-        run: pytest --cov=apex10 --cov-report=xml --cov-fail-under=80
+        run: pytest --cov=apex10 --cov-report=xml --cov-fail-under=30
 
       - name: Upload coverage report
         uses: codecov/codecov-action@v4

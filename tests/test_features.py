@@ -15,10 +15,10 @@ class TestFeatureSplit:
         assert len(ONPITCH_FEATURES) == 29
 
     def test_market_feature_count(self):
-        assert len(MARKET_FEATURES) == 16
+        assert len(MARKET_FEATURES) == 17
 
     def test_total_feature_count(self):
-        assert len(ALL_FEATURES) == 45
+        assert len(ALL_FEATURES) == 46
 
     def test_no_overlap_between_feature_sets(self):
         overlap = set(ONPITCH_FEATURES) & set(MARKET_FEATURES)
@@ -52,7 +52,7 @@ class TestGetFeatureMatrices:
     def test_market_shape(self):
         df = self._make_df(100)
         _, X_market, _, _ = get_feature_matrices(df)
-        assert X_market.shape == (100, 16)
+        assert X_market.shape == (100, 17)
 
     def test_target_is_binary(self):
         df = self._make_df()

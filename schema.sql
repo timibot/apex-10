@@ -99,6 +99,10 @@ CREATE TABLE IF NOT EXISTS bank_state (
   id INTEGER PRIMARY KEY DEFAULT 1,   -- Single-row table
   current_bank FLOAT NOT NULL,
   initial_bank FLOAT NOT NULL,
+  extracted_profit FLOAT DEFAULT 0.0,
+  total_wins INTEGER DEFAULT 0,
+  total_losses INTEGER DEFAULT 0,
+  stake_multiplier FLOAT DEFAULT 1.0,
   last_updated TIMESTAMPTZ DEFAULT NOW(),
   CONSTRAINT single_row CHECK (id = 1)
 );
@@ -137,3 +141,57 @@ CREATE TABLE IF NOT EXISTS club_elo (
   UNIQUE(team_slug, rating_date)
 );
 CREATE INDEX IF NOT EXISTS idx_elo_team_date ON club_elo(team_slug, rating_date);
+
+-- ── Phase 4: Upcoming fixtures for ticket generation ──────────────
+CREATE TABLE IF NOT EXISTS upcoming_fixtures (
+  id BIGSERIAL PRIMARY KEY,
+  api_match_id INTEGER UNIQUE NOT NULL,
+  league VARCHAR(50) NOT NULL,
+  match_date DATE NOT NULL,
+  home_team VARCHAR(100) NOT NULL,
+  away_team VARCHAR(100) NOT NULL,
+  best_bet_type VARCHAR(30),
+  best_bet_odds FLOAT,
+  opening_odds FLOAT,
+  lgbm_prob FLOAT,
+  xgb_prob FLOAT,
+  key_player_absent_home INTEGER DEFAULT 0,
+  key_player_absent_away INTEGER DEFAULT 0,
+  features_complete BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ── Gap Patches: Cache run logger ─────────────────────────────────
+CREATE TABLE IF NOT EXISTS cache_log (
+  id BIGSERIAL PRIMARY KEY,
+  run_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  fixtures_written INTEGER DEFAULT 0,
+  xg_written INTEGER DEFAULT 0,
+  odds_written INTEGER DEFAULT 0,
+  ppda_written INTEGER DEFAULT 0,
+  api_requests_used JSONB DEFAULT '{}',
+  sources_failed JSONB DEFAULT '[]',
+  runtime_seconds FLOAT,
+  success BOOLEAN DEFAULT TRUE
+);
+CREATE INDEX IF NOT EXISTS idx_cache_log_timestamp ON cache_log(run_timestamp);
+
+-- ── Gap Patches: Team PPDA from FBref ─────────────────────────────
+CREATE TABLE IF NOT EXISTS team_ppda (
+  id BIGSERIAL PRIMARY KEY,
+  team VARCHAR(100) NOT NULL,
+  league VARCHAR(50) NOT NULL,
+  season INTEGER NOT NULL,
+  ppda FLOAT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(team, season, league)
+);
+CREATE INDEX IF NOT EXISTS idx_team_ppda_lookup ON team_ppda(team, season);
+
+-- ── Gap Patches: ALTER existing bank_state if it already exists ───
+-- Run these only if bank_state was created BEFORE this schema update:
+-- ALTER TABLE bank_state ADD COLUMN IF NOT EXISTS extracted_profit FLOAT DEFAULT 0.0;
+-- ALTER TABLE bank_state ADD COLUMN IF NOT EXISTS total_wins INTEGER DEFAULT 0;
+-- ALTER TABLE bank_state ADD COLUMN IF NOT EXISTS total_losses INTEGER DEFAULT 0;
+-- ALTER TABLE bank_state ADD COLUMN IF NOT EXISTS stake_multiplier FLOAT DEFAULT 1.0;

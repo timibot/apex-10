@@ -24,3 +24,6 @@ responses==0.25.3
 
 # Linting
 ruff==0.4.4
+
+# Data fetchers (Gap Patches)
+soccerdata>=1.3.0

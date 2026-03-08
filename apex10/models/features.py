@@ -1,7 +1,7 @@
 """
 Builds the two orthogonal feature matrices from Supabase data.
 LightGBM → 29 on-pitch features
-XGBoost  → 16 market/context features
+XGBoost  → 17 market/context features
 
 All feature engineering lives here. Models receive clean numpy arrays.
 """
@@ -43,9 +43,10 @@ MARKET_FEATURES = [
     "manager_days_in_post", "manager_days_in_post_away",
     "motivation_asymmetry",
     "relegation_battle_away", "title_race_home",
-]  # 16 features
+    "elo_diff",  # GP-7: ClubElo home rating minus away rating
+]  # 17 features
 
-ALL_FEATURES = ONPITCH_FEATURES + MARKET_FEATURES  # 45 total
+ALL_FEATURES = ONPITCH_FEATURES + MARKET_FEATURES  # 46 total
 
 # Target: 1 = home win, 0 = draw or away win
 TARGET_COL = "home_win"
@@ -54,7 +55,7 @@ TARGET_COL = "home_win"
 def load_raw_features(league: str = "EPL") -> pd.DataFrame:
     """
     Load and join all feature data from Supabase into a single DataFrame.
-    Each row = one match. Columns = all 45 features + target + metadata.
+    Each row = one match. Columns = all 46 features + target + metadata.
     """
     db = get_client()
 
@@ -97,7 +98,7 @@ def _merge_and_engineer(
     odds: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Merge data sources and engineer all 45 features.
+    Merge data sources and engineer all 46 features.
     Missing values are imputed with column medians — never dropped.
     """
     df = matches.copy()
@@ -169,6 +170,7 @@ def _merge_and_engineer(
         "manager_days_in_post": 365, "manager_days_in_post_away": 365,
         "motivation_asymmetry": 0.0,
         "relegation_battle_away": 0, "title_race_home": 0,
+        "elo_diff": 0.0,  # GP-7: neutral stub
     }
     for col, default in stub_defaults.items():
         if col not in df.columns:

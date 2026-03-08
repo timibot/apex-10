@@ -1,29 +1,45 @@
-# ─── Phase 5: weekly Monday result logger ────────
-name: Score
+name: Weekly Score Logger
 
 on:
   schedule:
-    - cron: "0 8 * * 1"   # Every Monday at 08:00 UTC
+    - cron: "0 5 * * 1"    # Every Monday at 05:00 UTC (before cache.yml at 06:00)
   workflow_dispatch:
 
 jobs:
   score:
     runs-on: ubuntu-latest
+
+    env:
+      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .
+      - run: pip install -r requirements.txt
 
-      - name: Log results
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      - name: Run score logger
         run: python -m apex10.score.score
+
+      - name: Notify Discord — success
+        if: success()
+        run: |
+          curl -H "Content-Type: application/json" \
+            -d '{"content": "✅ APEX-10 score.py complete — results logged to Supabase"}' \
+            $DISCORD_WEBHOOK
+
+      - name: Notify Discord — failure
+        if: failure()
+        run: |
+          curl -H "Content-Type: application/json" \
+            -d '{"content": "❌ APEX-10 score.py FAILED — check GitHub Actions logs"}' \
+            $DISCORD_WEBHOOK

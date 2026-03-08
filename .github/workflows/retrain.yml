@@ -1,13 +1,14 @@
-name: Weekly Ticket Generator
+name: Annual Model Retrain
 
 on:
   schedule:
-    - cron: "0 10 * * 4"   # Every Thursday at 10:00 UTC (after cache.yml at 06:00)
-  workflow_dispatch:
+    - cron: "0 2 1 1 *"    # 1st January at 02:00 UTC every year
+  workflow_dispatch:         # Manual trigger for out-of-cycle retrains
 
 jobs:
-  ticket:
+  retrain:
     runs-on: ubuntu-latest
+    timeout-minutes: 120     # Optuna 100 trials × 2 models ≈ 40–60 min
 
     env:
       API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
@@ -27,19 +28,12 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: Generate weekly ticket
-        run: python -m apex10.ticket.ticket
-
-      - name: Notify Discord — success
-        if: success()
-        run: |
-          curl -H "Content-Type: application/json" \
-            -d '{"content": "✅ APEX-10 ticket generated — check Supabase for this week'\''s legs"}' \
-            $DISCORD_WEBHOOK
+      - name: Run annual retrain
+        run: python -m apex10.live.retrain
 
       - name: Notify Discord — failure
         if: failure()
         run: |
           curl -H "Content-Type: application/json" \
-            -d '{"content": "❌ APEX-10 ticket.py FAILED — check GitHub Actions logs immediately"}' \
+            -d '{"content": "🚨 APEX-10 Annual Retrain FAILED — check GitHub Actions logs"}' \
             $DISCORD_WEBHOOK

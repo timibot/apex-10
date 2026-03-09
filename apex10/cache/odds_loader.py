@@ -22,13 +22,13 @@ LEAGUE_CODES = {
     "Ligue 1": "F1",
 }
 
-# Season string format: 2019/20 → "1920", 2023/24 → "2324"
+# Season string format: 2021/22 → "2122", 2025/26 → "2526"
 SEASONS = {
-    2019: "1920",
-    2020: "2021",
     2021: "2122",
     2022: "2223",
     2023: "2324",
+    2024: "2425",
+    2025: "2526",
 }
 
 # Pinnacle columns in the CSV (best sharp odds available)

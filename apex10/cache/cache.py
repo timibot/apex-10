@@ -15,7 +15,7 @@ from apex10.db import get_client
 
 logger = logging.getLogger(__name__)
 
-BACKFILL_SEASONS = [2019, 2020, 2021, 2022, 2023]
+BACKFILL_SEASONS = [2021, 2022, 2023, 2024, 2025]
 
 
 def run_full_backfill(league_name: str = "EPL") -> dict:

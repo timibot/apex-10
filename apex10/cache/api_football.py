@@ -13,7 +13,7 @@ from apex10.config import LEAGUES, get_api_config
 logger = logging.getLogger(__name__)
 
 # Seasons to backfill — 5 years per spec
-BACKFILL_SEASONS = [2019, 2020, 2021, 2022, 2023]
+BACKFILL_SEASONS = [2021, 2022, 2023, 2024, 2025]
 
 
 def _headers() -> dict:

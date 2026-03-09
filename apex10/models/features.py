@@ -51,6 +51,55 @@ ALL_FEATURES = ONPITCH_FEATURES + MARKET_FEATURES  # 46 total
 # Target: 1 = home win, 0 = draw or away win
 TARGET_COL = "home_win"
 
+# ── Team name normalisation (cross-source reconciliation) ──────────────────
+# Maps variant names from Understat / football-data.co.uk → API-Football canonical
+# API-Football canonical: Arsenal, Aston Villa, Bournemouth, Brentford, Brighton,
+#   Chelsea, Crystal Palace, Everton, Fulham, Leeds, Leicester, Liverpool,
+#   Manchester City, Manchester United, Newcastle, Nottingham Forest,
+#   Southampton, Tottenham, West Ham, Wolves
+TEAM_NAME_MAP = {
+    # Understat → API-Football
+    "Wolverhampton Wanderers": "Wolves",
+    "Newcastle United": "Newcastle",
+    "Sheffield United": "Sheffield Utd",
+    "Leeds United": "Leeds",
+    "West Ham United": "West Ham United",
+    # football-data.co.uk → API-Football
+    "Man United": "Manchester United",
+    "Man City": "Manchester City",
+    "Nott'm Forest": "Nottingham Forest",
+    "Spurs": "Tottenham",
+}
+
+
+def normalise_team_name(name: str) -> str:
+    """Normalise a team name to the API-Football canonical form."""
+    return TEAM_NAME_MAP.get(name, name)
+
+
+def normalise_team_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply team name normalisation to home_team and away_team columns."""
+    df = df.copy()
+    if "home_team" in df.columns:
+        df["home_team"] = df["home_team"].map(normalise_team_name)
+    if "away_team" in df.columns:
+        df["away_team"] = df["away_team"].map(normalise_team_name)
+    return df
+
+
+def _fetch_all(query_builder, page_size: int = 1000) -> list[dict]:
+    """Paginate through Supabase query to get all rows (bypasses 1000 row limit)."""
+    all_rows = []
+    offset = 0
+    while True:
+        resp = query_builder.range(offset, offset + page_size - 1).execute()
+        batch = resp.data or []
+        all_rows.extend(batch)
+        if len(batch) < page_size:
+            break  # Last page
+        offset += page_size
+    return all_rows
+
 
 def load_raw_features(league: str = "EPL") -> pd.DataFrame:
     """
@@ -60,31 +109,31 @@ def load_raw_features(league: str = "EPL") -> pd.DataFrame:
     db = get_client()
 
     # Load matches
-    matches_resp = (
+    matches_data = _fetch_all(
         db.table("matches")
         .select("*")
         .eq("league", "Premier League")
         .eq("status", "finished")
         .order("match_date")
-        .execute()
     )
-    matches_df = pd.DataFrame(matches_resp.data)
+    matches_df = pd.DataFrame(matches_data)
 
     if matches_df.empty:
         raise ValueError("No match data found in Supabase")
 
-    # Load xG
-    xg_resp = db.table("match_xg").select("*").execute()
-    xg_df = pd.DataFrame(xg_resp.data)
+    # Load xG (paginated — often > 1000 rows)
+    xg_data = _fetch_all(db.table("match_xg").select("*"))
+    xg_df = pd.DataFrame(xg_data)
+    logger.info(f"Loaded {len(xg_df)} xG records")
 
-    # Load historical odds
-    odds_resp = (
+    # Load historical odds (paginated — often > 1000 rows)
+    odds_data = _fetch_all(
         db.table("historical_odds")
         .select("*")
         .eq("market", "1X2")
-        .execute()
     )
-    odds_df = pd.DataFrame(odds_resp.data)
+    odds_df = pd.DataFrame(odds_data)
+    logger.info(f"Loaded {len(odds_df)} odds records")
 
     # Merge
     df = _merge_and_engineer(matches_df, xg_df, odds_df)
@@ -101,15 +150,18 @@ def _merge_and_engineer(
     Merge data sources and engineer all 46 features.
     Missing values are imputed with column medians — never dropped.
     """
-    df = matches.copy()
+    df = normalise_team_columns(matches.copy())
     df["match_date"] = pd.to_datetime(df["match_date"])
-    df["season"] = df["match_date"].dt.year
+    # Use actual season from matches table (API-Football season year)
+    if "season" not in df.columns:
+        df["season"] = df["match_date"].dt.year
 
     # ── Target variable ────────────────────────────────────────────────────
     df[TARGET_COL] = (df["home_goals"] > df["away_goals"]).astype(int)
 
     # ── Merge xG ──────────────────────────────────────────────────────────
     if not xg.empty:
+        xg = normalise_team_columns(xg.copy())
         xg["match_date"] = pd.to_datetime(xg["match_date"])
         df = df.merge(
             xg[["match_date", "home_team", "away_team", "home_xg", "away_xg"]],
@@ -122,10 +174,12 @@ def _merge_and_engineer(
 
     # ── Merge odds ─────────────────────────────────────────────────────────
     if not odds.empty:
+        odds = normalise_team_columns(odds.copy())
+        odds["match_date"] = pd.to_datetime(odds["match_date"], errors="coerce")
         df = df.merge(
             odds[["home_team", "away_team", "match_date",
                   "odds_home", "odds_draw", "odds_away"]],
-            on=["home_team", "away_team"],
+            on=["home_team", "away_team", "match_date"],
             how="left",
         )
         df.rename(columns={

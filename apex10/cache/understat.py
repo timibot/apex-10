@@ -60,7 +60,7 @@ def fetch_league_xg(league_name: str, season_year: int) -> list[dict] | None:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-            page.goto(url, wait_until="networkidle", timeout=30000)
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
             # Wait for Understat to inject data into the DOM
             page.wait_for_timeout(3000)

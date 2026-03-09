@@ -87,12 +87,29 @@ def normalise_team_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _fetch_all(query_builder, page_size: int = 1000) -> list[dict]:
-    """Paginate through Supabase query to get all rows (bypasses 1000 row limit)."""
+def _fetch_all(query_fn, page_size: int = 1000) -> list[dict]:
+    """
+    Paginate through Supabase query to get all rows (bypasses 1000 row limit).
+    
+    query_fn: callable that returns a fresh query builder each time,
+              e.g. lambda: db.table("match_xg").select("*")
+    """
+    import time
     all_rows = []
     offset = 0
+    max_retries = 3
     while True:
-        resp = query_builder.range(offset, offset + page_size - 1).execute()
+        for attempt in range(max_retries):
+            try:
+                resp = query_fn().range(offset, offset + page_size - 1).execute()
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    logger.warning(f"Supabase query failed (attempt {attempt+1}), retrying in {wait}s: {e}")
+                    time.sleep(wait)
+                else:
+                    raise
         batch = resp.data or []
         all_rows.extend(batch)
         if len(batch) < page_size:
@@ -110,7 +127,7 @@ def load_raw_features(league: str = "EPL") -> pd.DataFrame:
 
     # Load matches
     matches_data = _fetch_all(
-        db.table("matches")
+        lambda: db.table("matches")
         .select("*")
         .eq("league", "Premier League")
         .eq("status", "finished")
@@ -122,13 +139,13 @@ def load_raw_features(league: str = "EPL") -> pd.DataFrame:
         raise ValueError("No match data found in Supabase")
 
     # Load xG (paginated — often > 1000 rows)
-    xg_data = _fetch_all(db.table("match_xg").select("*"))
+    xg_data = _fetch_all(lambda: db.table("match_xg").select("*"))
     xg_df = pd.DataFrame(xg_data)
     logger.info(f"Loaded {len(xg_df)} xG records")
 
     # Load historical odds (paginated — often > 1000 rows)
     odds_data = _fetch_all(
-        db.table("historical_odds")
+        lambda: db.table("historical_odds")
         .select("*")
         .eq("market", "1X2")
     )

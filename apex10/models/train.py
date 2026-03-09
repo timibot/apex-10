@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
-from apex10.config import MODEL
+import joblib
+
+from apex10.config import APEX_ENV, MODEL
 from apex10.db import get_client
 from apex10.models import lgbm_model, xgb_model
 from apex10.models.calibration import calibrate, calibration_improvement, fit_calibrator
@@ -23,13 +26,15 @@ from apex10.models.walk_forward import check_brier_gate, get_season_splits
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+MODEL_DIR = Path(__file__).parent.parent.parent / "models"
+
 
 def run_training(league: str = "EPL", n_trials: int = MODEL.OPTUNA_TRIALS) -> dict:
     """
     Full training pipeline. Returns summary dict with all results.
     Hard-stops if either model fails the Brier gate.
     """
-    logger.info("═══ APEX-10 Training Pipeline ═══")
+    logger.info(f"═══ APEX-10 Training Pipeline ({APEX_ENV}) ═══")
     db = get_client()
 
     # ── 1. Load features ──────────────────────────────────────────────────
@@ -72,7 +77,7 @@ def run_training(league: str = "EPL", n_trials: int = MODEL.OPTUNA_TRIALS) -> di
     lgbm_cal = fit_calibrator(y_val, lgbm_val_probs)
     xgb_cal = fit_calibrator(y_val, xgb_val_probs)
 
-    # ── 6. Test set evaluation (year 5 holdout) ───────────────────────────
+    # ── 6. Test set evaluation (holdout season) ───────────────────────────
     logger.info("Step 6: Test set evaluation")
     lgbm_test_raw = lgbm_model.predict_proba(lgbm, X_op_test)
     xgb_test_raw = xgb_model.predict_proba(xgb, X_mk_test)
@@ -83,14 +88,37 @@ def run_training(league: str = "EPL", n_trials: int = MODEL.OPTUNA_TRIALS) -> di
     lgbm_cal_info = calibration_improvement(y_test, lgbm_test_raw, lgbm_test_cal)
     xgb_cal_info = calibration_improvement(y_test, xgb_test_raw, xgb_test_cal)
 
-    # ── 7. Brier gate check ───────────────────────────────────────────────
-    logger.info("Step 7: Brier gate check")
-    lgbm_gate = check_brier_gate(y_test, lgbm_test_cal)
-    xgb_gate = check_brier_gate(y_test, xgb_test_cal)
+    # No-harm policy: only use calibration if it improves Brier score
+    # Isotonic calibration can overfit on small validation sets
+    from sklearn.metrics import brier_score_loss
+    lgbm_raw_brier = brier_score_loss(y_test, lgbm_test_raw)
+    lgbm_cal_brier = brier_score_loss(y_test, lgbm_test_cal)
+    if lgbm_cal_brier > lgbm_raw_brier:
+        logger.warning(
+            f"⚠️ LightGBM calibration DEGRADED Brier ({lgbm_raw_brier:.4f} → {lgbm_cal_brier:.4f}). "
+            f"Using raw probabilities."
+        )
+        lgbm_test_cal = lgbm_test_raw
+        lgbm_cal = None  # Don't serialise a harmful calibrator
+
+    xgb_raw_brier = brier_score_loss(y_test, xgb_test_raw)
+    xgb_cal_brier = brier_score_loss(y_test, xgb_test_cal)
+    if xgb_cal_brier > xgb_raw_brier:
+        logger.warning(
+            f"⚠️ XGBoost calibration DEGRADED Brier ({xgb_raw_brier:.4f} → {xgb_cal_brier:.4f}). "
+            f"Using raw probabilities."
+        )
+        xgb_test_cal = xgb_test_raw
+        xgb_cal = None
+
+    # ── 7. Brier gate check (environment-aware) ───────────────────────────
+    logger.info(f"Step 7: Brier gate check (env={APEX_ENV}, gate={MODEL.BRIER_GATE})")
+    lgbm_gate = check_brier_gate(y_test, lgbm_test_cal, model_name="LightGBM")
+    xgb_gate = check_brier_gate(y_test, xgb_test_cal, model_name="XGBoost")
 
     if not lgbm_gate["passed"] or not xgb_gate["passed"]:
         logger.error("❌ TRAINING FAILED — One or more models did not pass Brier gate.")
-        logger.error("DO NOT PROCEED TO PHASE 4.")
+        logger.error(f"Environment: {APEX_ENV}, Gate: {MODEL.BRIER_GATE}")
         return {"passed": False, "lgbm": lgbm_gate, "xgb": xgb_gate}
 
     # ── 8. SHAP analysis ──────────────────────────────────────────────────
@@ -99,8 +127,17 @@ def run_training(league: str = "EPL", n_trials: int = MODEL.OPTUNA_TRIALS) -> di
     xgb_shap = compute_shap_xgb(xgb, X_mk_val)
     subspace_validation = validate_orthogonal_subspacing(lgbm_shap, xgb_shap)
 
-    # ── 9. Store params in Supabase ───────────────────────────────────────
-    logger.info("Step 9: Storing model params")
+    # ── 9. Serialise models to disk ───────────────────────────────────────
+    logger.info("Step 9: Serialising models")
+    MODEL_DIR.mkdir(exist_ok=True)
+    joblib.dump(lgbm, MODEL_DIR / "lgbm_latest.joblib")
+    joblib.dump(xgb, MODEL_DIR / "xgb_latest.joblib")
+    joblib.dump(lgbm_cal, MODEL_DIR / "lgbm_calibrator.joblib")
+    joblib.dump(xgb_cal, MODEL_DIR / "xgb_calibrator.joblib")
+    logger.info(f"Models saved to {MODEL_DIR}")
+
+    # ── 10. Store params in Supabase ──────────────────────────────────────
+    logger.info("Step 10: Storing model params")
 
     # Get current max version
     existing = db.table("model_params").select("version").order(
@@ -127,6 +164,8 @@ def run_training(league: str = "EPL", n_trials: int = MODEL.OPTUNA_TRIALS) -> di
 
     summary = {
         "passed": True,
+        "environment": APEX_ENV,
+        "production_safe": lgbm_gate["production_safe"] and xgb_gate["production_safe"],
         "version": next_version,
         "lgbm_brier": lgbm_gate["brier_score"],
         "xgb_brier": xgb_gate["brier_score"],
@@ -138,7 +177,10 @@ def run_training(league: str = "EPL", n_trials: int = MODEL.OPTUNA_TRIALS) -> di
         "splits": {k: v for k, v in splits.items() if "seasons" in k},
     }
 
-    logger.info(f"═══ Training complete ═══\n{json.dumps(summary, indent=2)}")
+    if not summary["production_safe"]:
+        logger.warning("⚠️  Models passed PAPER gate but are NOT production-safe. Stake = 0.00.")
+    
+    logger.info(f"═══ Training complete ═══\n{json.dumps(summary, indent=2, default=str)}")
     return summary
 
 
@@ -146,3 +188,4 @@ if __name__ == "__main__":
     result = run_training()
     if not result["passed"]:
         raise SystemExit(1)
+

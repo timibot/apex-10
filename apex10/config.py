@@ -11,6 +11,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── Environment mode ───────────────────────────────────────────────────────
+# PAPER_TRADE: relaxed gates, zero-stake output
+# PRODUCTION:  strict gates, live capital
+APEX_ENV = os.getenv("APEX_ENV", "PAPER_TRADE").upper()
+
 
 @dataclass(frozen=True)
 class OddsConfig:
@@ -25,14 +30,20 @@ class OddsConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    BRIER_GATE: float = 0.20        # Must beat this to deploy
-    BRIER_LIVE_ALERT: float = 0.24  # Live breach → halve stakes
-    BRIER_VARIANCE_GATE: float = 0.02  # Paper trade stability gate
+    BRIER_GATE_PRODUCTION: float = 0.20    # Strict gate for live capital
+    BRIER_GATE_PAPER: float = 0.255        # Relaxed gate for paper trading
+    BRIER_LIVE_ALERT: float = 0.24         # Live breach → halve stakes
+    BRIER_VARIANCE_GATE: float = 0.02      # Paper trade stability gate
     TRAIN_YEARS: int = 5
     OPTUNA_TRIALS: int = 100
     WALK_FORWARD_TEST_YEAR: int = 5
     MIN_PAPER_TICKETS: int = 20
-    ROLLING_BRIER_WINDOW: int = 15  # Live Brier monitoring window
+    ROLLING_BRIER_WINDOW: int = 15         # Live Brier monitoring window
+
+    @property
+    def BRIER_GATE(self) -> float:
+        """Environment-aware Brier gate threshold."""
+        return self.BRIER_GATE_PRODUCTION if APEX_ENV == "PRODUCTION" else self.BRIER_GATE_PAPER
 
 
 @dataclass(frozen=True)

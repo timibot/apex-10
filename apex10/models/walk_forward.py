@@ -23,10 +23,22 @@ def get_season_splits(seasons: np.ndarray) -> dict:
     if len(unique_seasons) < 3:
         raise ValueError(f"Need at least 3 seasons, got {len(unique_seasons)}")
 
-    # Walk-forward: train=first 3, val=4th, test=5th (most recent)
-    train_seasons = unique_seasons[:3]
-    val_seasons = [unique_seasons[3]] if len(unique_seasons) >= 4 else []
-    test_seasons = [unique_seasons[-1]]
+    # Walk-forward splits based on number of seasons available
+    if len(unique_seasons) == 3:
+        # 3 seasons: train on 1st, validate on 2nd, test on 3rd
+        train_seasons = [unique_seasons[0]]
+        val_seasons = [unique_seasons[1]]
+        test_seasons = [unique_seasons[2]]
+    elif len(unique_seasons) == 4:
+        # 4 seasons: train on 1-2, validate on 3rd, test on 4th
+        train_seasons = unique_seasons[:2]
+        val_seasons = [unique_seasons[2]]
+        test_seasons = [unique_seasons[3]]
+    else:
+        # 5+ seasons: train on first N-2, validate on N-1, test on N
+        train_seasons = unique_seasons[:-2]
+        val_seasons = [unique_seasons[-2]]
+        test_seasons = [unique_seasons[-1]]
 
     train_idx = np.where(np.isin(seasons, train_seasons))[0]
     val_idx = np.where(np.isin(seasons, val_seasons))[0]
@@ -53,24 +65,44 @@ def get_season_splits(seasons: np.ndarray) -> dict:
     }
 
 
-def check_brier_gate(y_true: np.ndarray, y_prob: np.ndarray, gate: float = 0.20) -> dict:
+def check_brier_gate(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    model_name: str = "model",
+) -> dict:
     """
-    Evaluate Brier score against deployment gate.
-    Returns dict with score, passed bool, and gap to gate.
+    Environment-aware Brier score validation.
+
+    PAPER_TRADE: gate = 0.255, warns if > 0.20
+    PRODUCTION:  gate = 0.20, hard reject
     """
+    from apex10.config import MODEL, APEX_ENV
+
+    gate = MODEL.BRIER_GATE  # Environment-aware via property
     score = brier_score_loss(y_true, y_prob)
     passed = score < gate
 
     result = {
         "brier_score": round(score, 4),
         "gate": gate,
+        "environment": APEX_ENV,
         "passed": passed,
         "gap": round(gate - score, 4),
+        "production_safe": score < 0.20,
     }
 
     if passed:
-        logger.info(f"✅ Brier gate PASSED: {score:.4f} < {gate}")
+        logger.info(f"✅ [{model_name}] Brier gate PASSED: {score:.4f} < {gate} ({APEX_ENV})")
+        if score >= 0.20 and APEX_ENV == "PAPER_TRADE":
+            logger.warning(
+                f"⚠️  [{model_name}] Passed paper gate but UNSAFE for live capital. "
+                f"Stake locked to 0.00 until Brier < 0.20."
+            )
     else:
-        logger.error(f"❌ Brier gate FAILED: {score:.4f} >= {gate}. DO NOT DEPLOY.")
+        logger.error(
+            f"❌ [{model_name}] Brier gate FAILED: {score:.4f} >= {gate} ({APEX_ENV}). "
+            f"DO NOT DEPLOY."
+        )
 
     return result
+

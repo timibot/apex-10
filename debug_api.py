@@ -3,7 +3,7 @@ from apex10.db import get_client
 db = get_client()
 r = db.table("upcoming_fixtures").select(
     "league,home_team,away_team,lgbm_prob,xgb_prob,consensus_prob,match_date"
-).order("match_date").execute()
+).order("league").order("match_date").execute()
 print(f"{'Date':<12} {'League':<18} {'Match':<45} {'LGBM':>6} {'XGB':>6} {'CONS':>6}")
 print("-" * 95)
 for d in r.data:

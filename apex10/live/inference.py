@@ -27,6 +27,7 @@ from apex10.models.features import (
     ONPITCH_FEATURES,
     normalise_team_name,
 )
+from apex10.scoring.dixon_coles import derive_probabilities
 
 logger = logging.getLogger(__name__)
 
@@ -493,6 +494,74 @@ def score_fixture(features: dict, models: dict) -> dict:
     }
 
 
+def _get_league_rho(db, league: str) -> float:
+    """Get rho correction for a league from Supabase."""
+    model_league = LEAGUE_DIR_MAP.get(league, league)
+    try:
+        result = db.table("league_rho").select("rho").eq("league", model_league).execute()
+        if result.data:
+            return float(result.data[0]["rho"])
+    except Exception:
+        pass
+    return -0.13  # default
+
+
+def _find_best_bet(
+    features: dict,
+    home_probs: dict,
+    match_odds: dict | None,
+) -> tuple[str, float, float]:
+    """
+    Compare Dixon-Coles model probabilities vs bookmaker odds across all markets.
+    Returns (bet_type, best_odds, model_prob) for the bet with the highest edge
+    within the 1.20–1.49 odds range.
+
+    Fall back to Home Win if no market has odds in range.
+    """
+    # Map our probability keys to odds API keys and human-readable names
+    MARKET_MAP = {
+        "home_win":  ("home",     "Home Win"),
+        "dc_1x":     (None,       "Double Chance 1X"),     # no bookmaker odds yet
+        "dnb_home":  (None,       "Draw No Bet"),          # no bookmaker odds yet
+        "over_1_5":  ("over_1_5", "Over 1.5 Goals"),
+        "over_2_5":  ("over_2_5", "Over 2.5 Goals"),
+        "under_3_5": ("under_3_5","Under 3.5 Goals"),
+    }
+
+    best_bet = "Home Win"
+    best_odds = match_odds.get("home", 1.5) if match_odds else 1.5
+    best_prob = home_probs.get("home_win", 0.5)
+    best_edge = -999.0
+
+    for prob_key, (odds_key, bet_name) in MARKET_MAP.items():
+        model_prob = home_probs.get(prob_key, 0)
+        if model_prob <= 0:
+            continue
+
+        # Get bookmaker odds for this market
+        if odds_key and match_odds and match_odds.get(odds_key):
+            bookie_odds = match_odds[odds_key]
+        else:
+            # Derive fair odds from model prob (no vig)
+            bookie_odds = round(1.0 / model_prob, 3) if model_prob > 0 else 99.0
+
+        # Only consider bets in the target range (or close to it)
+        implied_prob = 1.0 / bookie_odds if bookie_odds > 1.0 else 1.0
+        edge = model_prob - implied_prob
+
+        # Prefer bets in range with positive edge
+        in_range = 1.10 <= bookie_odds <= 1.60  # slightly wider for ranking
+        score = edge + (0.5 if in_range else 0.0)  # bonus for being in range
+
+        if score > best_edge:
+            best_edge = score
+            best_bet = bet_name
+            best_odds = bookie_odds
+            best_prob = model_prob
+
+    return best_bet, round(best_odds, 3), round(best_prob, 4)
+
+
 def run_inference() -> dict:
     """
     Full inference pipeline:
@@ -540,13 +609,23 @@ def run_inference() -> dict:
                 continue
 
             leagues_loaded.add(league_name)
+            league_rho = _get_league_rho(db, league_name)
 
             for fixture in league_fixtures:
                 try:
                     features = build_feature_vector(fixture, db, elo_ratings=elo_ratings, live_odds=live_odds)
                     probs = score_fixture(features, models)
 
-                    best_odds = features.get("odds_opening_home", 1.5)
+                    # Dixon-Coles multi-market probabilities
+                    home_xg_avg = features.get("xg_home_l8", 1.3)
+                    away_xg_avg = features.get("xg_away_l8", 1.1)
+                    dc_probs = derive_probabilities(home_xg_avg, away_xg_avg, league_rho)
+
+                    # Find best-value bet across all markets
+                    match_odds_data = get_match_odds(live_odds, fixture["home_team"], fixture["away_team"])
+                    best_bet_type, best_odds, best_prob = _find_best_bet(
+                        features, dc_probs, match_odds_data
+                    )
 
                     row = {
                         "api_match_id": fixture["id"],
@@ -556,8 +635,8 @@ def run_inference() -> dict:
                         "away_team": fixture["away_team"],
                         "lgbm_prob": probs["lgbm_prob"],
                         "xgb_prob": probs["xgb_prob"],
-                        "consensus_prob": probs["consensus_prob"],
-                        "best_bet_type": "Home Win",
+                        "consensus_prob": best_prob,
+                        "best_bet_type": best_bet_type,
                         "best_bet_odds": best_odds,
                         "opening_odds": best_odds,
                         "key_player_absent_home": 0,
@@ -567,8 +646,8 @@ def run_inference() -> dict:
                     scored.append(row)
                     logger.info(
                         f"  [{league_name}] {fixture['home_team']} vs {fixture['away_team']}: "
-                        f"LGBM={probs['lgbm_prob']:.3f} XGB={probs['xgb_prob']:.3f} "
-                        f"consensus={probs['consensus_prob']:.3f}"
+                        f"Best={best_bet_type} @{best_odds:.2f} (prob={best_prob:.3f}) "
+                        f"LGBM={probs['lgbm_prob']:.3f} XGB={probs['xgb_prob']:.3f}"
                     )
 
                 except Exception as e:

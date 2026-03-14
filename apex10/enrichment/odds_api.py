@@ -101,7 +101,7 @@ def fetch_live_odds(leagues: list[str] | None = None) -> dict[str, dict]:
         params = {
             "apiKey": cfg.ODDS_API_KEY,
             "regions": "uk",
-            "markets": "h2h",
+            "markets": "h2h,totals",
             "oddsFormat": "decimal",
         }
 
@@ -126,24 +126,50 @@ def fetch_live_odds(leagues: list[str] | None = None) -> dict[str, dict]:
                 best_home = 1.0
                 best_draw = 1.0
                 best_away = 1.0
+                # Over/Under totals
+                best_over_1_5 = 1.0
+                best_over_2_5 = 1.0
+                best_under_2_5 = 1.0
+                best_under_3_5 = 1.0
 
                 for bookmaker in event.get("bookmakers", []):
                     for market in bookmaker.get("markets", []):
-                        if market.get("key") != "h2h":
-                            continue
-                        outcomes = {o["name"]: o["price"] for o in market.get("outcomes", [])}
-                        if home_price := outcomes.get(event.get("home_team", "")):
-                            best_home = max(best_home, home_price)
-                        if draw_price := outcomes.get("Draw"):
-                            best_draw = max(best_draw, draw_price)
-                        if away_price := outcomes.get(event.get("away_team", "")):
-                            best_away = max(best_away, away_price)
+                        mkey = market.get("key", "")
+                        outcomes = {o["name"]: o.get("price", 0) for o in market.get("outcomes", [])}
+
+                        if mkey == "h2h":
+                            if home_price := outcomes.get(event.get("home_team", "")):
+                                best_home = max(best_home, home_price)
+                            if draw_price := outcomes.get("Draw"):
+                                best_draw = max(best_draw, draw_price)
+                            if away_price := outcomes.get(event.get("away_team", "")):
+                                best_away = max(best_away, away_price)
+
+                        elif mkey == "totals":
+                            point = market.get("outcomes", [{}])[0].get("point", 0)
+                            over_price = outcomes.get("Over", 0)
+                            under_price = outcomes.get("Under", 0)
+                            if point == 1.5:
+                                if over_price > best_over_1_5:
+                                    best_over_1_5 = over_price
+                            elif point == 2.5:
+                                if over_price > best_over_2_5:
+                                    best_over_2_5 = over_price
+                                if under_price > best_under_2_5:
+                                    best_under_2_5 = under_price
+                            elif point == 3.5:
+                                if under_price > best_under_3_5:
+                                    best_under_3_5 = under_price
 
                 if best_home > 1.0:  # Only store if we actually got odds
                     all_odds[match_key] = {
                         "home": best_home,
                         "draw": best_draw,
                         "away": best_away,
+                        "over_1_5": best_over_1_5 if best_over_1_5 > 1.0 else None,
+                        "over_2_5": best_over_2_5 if best_over_2_5 > 1.0 else None,
+                        "under_2_5": best_under_2_5 if best_under_2_5 > 1.0 else None,
+                        "under_3_5": best_under_3_5 if best_under_3_5 > 1.0 else None,
                     }
 
         except httpx.HTTPStatusError as e:

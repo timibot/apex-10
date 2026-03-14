@@ -1,6 +1,7 @@
 """
 Live inference engine — Phase 7.
-Fetches upcoming fixtures, builds feature vectors, scores with trained models,
+Fetches upcoming fixtures from TheSportsDB (free, no API key needed),
+builds feature vectors, scores with trained models,
 and writes predictions to upcoming_fixtures table for the ticket pipeline.
 
 Run: python -m apex10.live.inference
@@ -17,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from apex10.cache.cache_log import CacheRunLogger
-from apex10.config import APEX_ENV, LEAGUES, get_api_config
+from apex10.config import APEX_ENV, LEAGUES
 from apex10.db import get_client
 from apex10.models.features import (
     MARKET_FEATURES,
@@ -28,6 +29,38 @@ from apex10.models.features import (
 logger = logging.getLogger(__name__)
 
 MODEL_DIR = Path(__file__).parent.parent.parent / "models"
+
+# TheSportsDB EPL league ID
+THESPORTSDB_EPL_ID = 4328
+
+# Team name mapping: TheSportsDB → API-Football/Supabase convention
+SPORTSDB_TEAM_MAP = {
+    "Man United": "Manchester United",
+    "Man City": "Manchester City",
+    "Spurs": "Tottenham",
+    "Tottenham Hotspur": "Tottenham",
+    "Wolverhampton Wanderers": "Wolves",
+    "Wolverhampton": "Wolves",
+    "Newcastle United": "Newcastle",
+    "Newcastle Utd": "Newcastle",
+    "Nottingham Forest": "Nottingham Forest",
+    "Nott'm Forest": "Nottingham Forest",
+    "West Ham United": "West Ham",
+    "West Ham": "West Ham",
+    "Leicester City": "Leicester",
+    "Brighton and Hove Albion": "Brighton",
+    "Brighton": "Brighton",
+    "Crystal Palace": "Crystal Palace",
+    "Sheffield United": "Sheffield Utd",
+    "Ipswich Town": "Ipswich",
+    "Luton Town": "Luton",
+}
+
+
+def _normalise_sportsdb_team(name: str) -> str:
+    """Normalise TheSportsDB team name to match our Supabase convention."""
+    return SPORTSDB_TEAM_MAP.get(name, name)
+
 
 # ── Stub defaults for features we don't have live data for yet ──────────────
 STUB_DEFAULTS = {
@@ -66,36 +99,82 @@ def load_models() -> dict:
     return models
 
 
-def fetch_upcoming_fixtures(league_id: int, days_ahead: int = 10) -> list[dict]:
-    """Fetch upcoming (not started) fixtures from API-Football."""
-    cfg = get_api_config()
-    url = f"{cfg.API_FOOTBALL_BASE}/fixtures"
-
+def _current_season_str() -> str:
+    """Return TheSportsDB season string, e.g. '2025-2026'."""
     today = date.today()
-    end_date = today + timedelta(days=days_ahead)
+    start_year = today.year if today.month >= 8 else today.year - 1
+    return f"{start_year}-{start_year + 1}"
 
-    params = {
-        "league": league_id,
-        "season": today.year if today.month >= 8 else today.year - 1,
-        "from": str(today),
-        "to": str(end_date),
-        "status": "NS",  # Not Started
-    }
 
-    headers = {
-        "x-apisports-key": cfg.API_FOOTBALL_KEY,
-        "x-apisports-host": "v3.football.api-sports.io",
-    }
+def fetch_upcoming_fixtures() -> list[dict]:
+    """
+    Fetch upcoming EPL fixtures from TheSportsDB using eventsround.php.
+    Auto-detects the next round with unplayed matches.
+    Returns normalised fixture dicts compatible with the scoring pipeline.
+    """
+    season = _current_season_str()
+    today = date.today()
+    logger.info(f"Fetching EPL fixtures from TheSportsDB (season={season})...")
 
-    logger.info(f"Fetching upcoming fixtures: {today} to {end_date}")
+    all_fixtures = []
 
-    with httpx.Client(timeout=30.0) as client:
-        response = client.get(url, headers=headers, params=params)
-        response.raise_for_status()
+    with httpx.Client(timeout=15.0) as client:
+        # Start scanning from a high round (by March, EPL is ~round 28-30)
+        # Fall back to earlier rounds only if needed
+        start_round = max(1, 25 if today.month >= 1 else 1)
+        for round_num in range(start_round, 39):
+            url = "https://www.thesportsdb.com/api/v1/json/3/eventsround.php"
+            params = {"id": THESPORTSDB_EPL_ID, "r": round_num, "s": season}
+            response = client.get(url, params=params)
+            response.raise_for_status()
 
-    fixtures = response.json().get("response", [])
-    logger.info(f"Found {len(fixtures)} upcoming fixtures")
-    return fixtures
+            events = response.json().get("events") or []
+            if not events:
+                continue
+
+            # Check if this round has upcoming matches
+            has_upcoming = False
+            for event in events:
+                event_date_str = event.get("dateEvent", "")
+                try:
+                    event_date = date.fromisoformat(event_date_str)
+                except ValueError:
+                    continue
+                # Include matches today or in the future
+                if event_date >= today:
+                    has_upcoming = True
+                    break
+
+            if has_upcoming:
+                # Found the current/next round — extract upcoming matches
+                for event in events:
+                    event_date_str = event.get("dateEvent", "")
+                    try:
+                        event_date = date.fromisoformat(event_date_str)
+                    except ValueError:
+                        continue
+                    if event_date < today:
+                        continue  # Skip already-played matches in this round
+
+                    home = _normalise_sportsdb_team(event.get("strHomeTeam", ""))
+                    away = _normalise_sportsdb_team(event.get("strAwayTeam", ""))
+
+                    fixture = {
+                        "id": int(event.get("idEvent", 0)),
+                        "league": "Premier League",
+                        "match_date": event_date_str,
+                        "home_team": home,
+                        "away_team": away,
+                        "round": round_num,
+                        "time": event.get("strTime", ""),
+                    }
+                    all_fixtures.append(fixture)
+
+                logger.info(f"Round {round_num}: {len(all_fixtures)} upcoming fixtures")
+                break  # Found the active round, stop scanning
+
+    logger.info(f"Found {len(all_fixtures)} upcoming EPL fixtures")
+    return all_fixtures
 
 
 def _build_rolling_stats(db, team: str, role: str, n: int = 8) -> dict:
@@ -103,7 +182,6 @@ def _build_rolling_stats(db, team: str, role: str, n: int = 8) -> dict:
     Build rolling stats for a team from recent historical matches.
     role = 'home' or 'away' — which side of the fixture the team is on.
     """
-    # Get recent finished matches for this team (either home or away)
     home_matches = (
         db.table("matches")
         .select("home_goals, away_goals, match_date")
@@ -124,7 +202,6 @@ def _build_rolling_stats(db, team: str, role: str, n: int = 8) -> dict:
         .execute()
     ).data or []
 
-    # Combine and sort
     all_matches = []
     for m in home_matches:
         all_matches.append({
@@ -164,10 +241,12 @@ def _build_rolling_stats(db, team: str, role: str, n: int = 8) -> dict:
 
 def _build_xg_stats(db, team: str, n: int = 8) -> dict:
     """Fetch rolling xG stats for a team."""
+    norm_team = normalise_team_name(team)
+
     home_xg = (
         db.table("match_xg")
         .select("home_xg, away_xg")
-        .eq("home_team", normalise_team_name(team))
+        .eq("home_team", norm_team)
         .order("match_date", desc=True)
         .limit(n)
         .execute()
@@ -176,7 +255,7 @@ def _build_xg_stats(db, team: str, n: int = 8) -> dict:
     away_xg = (
         db.table("match_xg")
         .select("home_xg, away_xg")
-        .eq("away_team", normalise_team_name(team))
+        .eq("away_team", norm_team)
         .order("match_date", desc=True)
         .limit(n)
         .execute()
@@ -185,7 +264,6 @@ def _build_xg_stats(db, team: str, n: int = 8) -> dict:
     xg_for = [float(m["home_xg"]) for m in home_xg] + [float(m["away_xg"]) for m in away_xg]
     xg_against = [float(m["away_xg"]) for m in home_xg] + [float(m["home_xg"]) for m in away_xg]
 
-    # Sort by recency would need dates — just average all
     xg_for_avg = np.mean(xg_for) if xg_for else 1.3
     xg_against_avg = np.mean(xg_against) if xg_against else 1.1
 
@@ -201,13 +279,8 @@ def build_feature_vector(fixture: dict, db) -> dict:
     Build the full 46-feature vector for one upcoming fixture.
     Uses real rolling stats where available, stubs for the rest.
     """
-    teams = fixture["teams"]
-    home_team = teams["home"]["name"]
-    away_team = teams["away"]["name"]
-
-    # Normalise for xG lookup
-    home_norm = normalise_team_name(home_team)
-    away_norm = normalise_team_name(away_team)
+    home_team = fixture["home_team"]
+    away_team = fixture["away_team"]
 
     # Rolling match stats
     home_stats = _build_rolling_stats(db, home_team, "home")
@@ -239,10 +312,7 @@ def build_feature_vector(fixture: dict, db) -> dict:
     return features
 
 
-def score_fixture(
-    features: dict,
-    models: dict,
-) -> dict:
+def score_fixture(features: dict, models: dict) -> dict:
     """Score a fixture with both models, return probabilities."""
     onpitch_vec = np.array([[features.get(f, 0.0) for f in ONPITCH_FEATURES]])
     market_vec = np.array([[features.get(f, 0.0) for f in MARKET_FEATURES]])
@@ -250,7 +320,6 @@ def score_fixture(
     # LightGBM
     lgbm = models["lgbm_latest"]
     lgbm_raw = lgbm.predict(onpitch_vec)[0]
-    # Apply calibrator if available and not None
     lgbm_cal = models.get("lgbm_calibrator")
     if lgbm_cal is not None:
         lgbm_prob = lgbm_cal.predict([lgbm_raw])[0]
@@ -273,11 +342,11 @@ def score_fixture(
     }
 
 
-def run_inference(days_ahead: int = 10) -> dict:
+def run_inference() -> dict:
     """
     Full inference pipeline:
     1. Load models
-    2. Fetch upcoming fixtures
+    2. Fetch upcoming fixtures from TheSportsDB
     3. Score each fixture
     4. Write to upcoming_fixtures table
     5. Log cache run
@@ -291,40 +360,32 @@ def run_inference(days_ahead: int = 10) -> dict:
     if models["lgbm_latest"] is None or models["xgb_latest"] is None:
         raise RuntimeError("Models not found — run training first: python -m apex10.models.train")
 
-    league_id = LEAGUES.LEAGUE_IDS["EPL"]
-
     with CacheRunLogger(db) as cache_log:
-        # Fetch upcoming fixtures
-        raw_fixtures = fetch_upcoming_fixtures(league_id, days_ahead)
-        cache_log.stats["fixtures_written"] = len(raw_fixtures)
+        # Fetch upcoming fixtures from TheSportsDB
+        fixtures = fetch_upcoming_fixtures()
+        cache_log.stats["fixtures_written"] = len(fixtures)
 
-        if not raw_fixtures:
+        if not fixtures:
             logger.warning("No upcoming fixtures found")
             return {"fixtures": 0, "scored": 0}
 
         scored = []
-        for raw in raw_fixtures:
+        for fixture in fixtures:
             try:
-                fixture_info = raw["fixture"]
-                teams = raw["teams"]
-                league = raw["league"]
-
                 # Build features from historical data
-                features = build_feature_vector(raw, db)
+                features = build_feature_vector(fixture, db)
 
                 # Score with both models
                 probs = score_fixture(features, models)
 
-                # Determine best bet (home win for now — Phase 2: expand)
-                implied_prob = 1.0 / features.get("odds_opening_home", 1.5)
                 best_odds = features.get("odds_opening_home", 1.5)
 
                 row = {
-                    "api_match_id": fixture_info["id"],
-                    "league": league["name"],
-                    "match_date": fixture_info["date"][:10],
-                    "home_team": teams["home"]["name"],
-                    "away_team": teams["away"]["name"],
+                    "api_match_id": fixture["id"],
+                    "league": fixture["league"],
+                    "match_date": fixture["match_date"],
+                    "home_team": fixture["home_team"],
+                    "away_team": fixture["away_team"],
                     "lgbm_prob": probs["lgbm_prob"],
                     "xgb_prob": probs["xgb_prob"],
                     "consensus_prob": probs["consensus_prob"],
@@ -337,13 +398,13 @@ def run_inference(days_ahead: int = 10) -> dict:
                 }
                 scored.append(row)
                 logger.info(
-                    f"  {teams['home']['name']} vs {teams['away']['name']}: "
+                    f"  {fixture['home_team']} vs {fixture['away_team']}: "
                     f"LGBM={probs['lgbm_prob']:.3f} XGB={probs['xgb_prob']:.3f} "
                     f"consensus={probs['consensus_prob']:.3f}"
                 )
 
             except Exception as e:
-                logger.error(f"Failed to score fixture: {e}")
+                logger.error(f"Failed to score {fixture.get('home_team','?')} vs {fixture.get('away_team','?')}: {e}")
                 cache_log.add_source_failure("inference", str(e))
 
         # Upsert to upcoming_fixtures
@@ -354,7 +415,7 @@ def run_inference(days_ahead: int = 10) -> dict:
             logger.info(f"Wrote {len(scored)} scored fixtures to upcoming_fixtures")
 
     summary = {
-        "fixtures_found": len(raw_fixtures),
+        "fixtures_found": len(fixtures),
         "scored": len(scored),
         "environment": APEX_ENV,
     }

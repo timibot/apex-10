@@ -9,7 +9,7 @@ Run: python -m apex10.live.inference
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -30,11 +30,18 @@ logger = logging.getLogger(__name__)
 
 MODEL_DIR = Path(__file__).parent.parent.parent / "models"
 
-# TheSportsDB EPL league ID
-THESPORTSDB_EPL_ID = 4328
+# TheSportsDB league IDs — top 5 European leagues
+THESPORTSDB_LEAGUES = {
+    "Premier League": 4328,
+    "La Liga": 4335,
+    "Bundesliga": 4331,
+    "Serie A": 4332,
+    "Ligue 1": 4334,
+}
 
-# Team name mapping: TheSportsDB → API-Football/Supabase convention
+# Team name mapping: TheSportsDB → normalised convention
 SPORTSDB_TEAM_MAP = {
+    # England
     "Man United": "Manchester United",
     "Man City": "Manchester City",
     "Spurs": "Tottenham",
@@ -43,17 +50,32 @@ SPORTSDB_TEAM_MAP = {
     "Wolverhampton": "Wolves",
     "Newcastle United": "Newcastle",
     "Newcastle Utd": "Newcastle",
-    "Nottingham Forest": "Nottingham Forest",
     "Nott'm Forest": "Nottingham Forest",
     "West Ham United": "West Ham",
-    "West Ham": "West Ham",
     "Leicester City": "Leicester",
     "Brighton and Hove Albion": "Brighton",
-    "Brighton": "Brighton",
-    "Crystal Palace": "Crystal Palace",
     "Sheffield United": "Sheffield Utd",
     "Ipswich Town": "Ipswich",
     "Luton Town": "Luton",
+    # Spain
+    "Atletico Madrid": "Atletico Madrid",
+    "Athletic Bilbao": "Athletic Club",
+    "Betis": "Real Betis",
+    # Germany
+    "Bayern Munich": "Bayern Munich",
+    "Borussia Dortmund": "Dortmund",
+    "Borussia Monchengladbach": "Monchengladbach",
+    "RB Leipzig": "RB Leipzig",
+    # Italy
+    "AC Milan": "AC Milan",
+    "Inter Milan": "Inter",
+    "Internazionale": "Inter",
+    # France
+    "Paris Saint-Germain": "PSG",
+    "Paris SG": "PSG",
+    "AS Monaco": "Monaco",
+    "Olympique Lyonnais": "Lyon",
+    "Olympique de Marseille": "Marseille",
 }
 
 
@@ -106,74 +128,118 @@ def _current_season_str() -> str:
     return f"{start_year}-{start_year + 1}"
 
 
-def fetch_upcoming_fixtures() -> list[dict]:
+def _has_kicked_off(event_date_str: str, event_time_str: str) -> bool:
     """
-    Fetch upcoming EPL fixtures from TheSportsDB using eventsround.php.
-    Auto-detects the next round with unplayed matches.
-    Returns normalised fixture dicts compatible with the scoring pipeline.
+    Check if a match has already kicked off based on date + time.
+    Times from TheSportsDB are in UTC.
     """
-    season = _current_season_str()
+    now_utc = datetime.now(timezone.utc)
+    try:
+        event_date = date.fromisoformat(event_date_str)
+        # If match is in the future (tomorrow+), it hasn't kicked off
+        if event_date > now_utc.date():
+            return False
+        # If match is in the past, it has kicked off
+        if event_date < now_utc.date():
+            return True
+        # Match is today — check the time
+        if event_time_str:
+            time_str = event_time_str.replace("Z", "").strip()
+            # Handle formats like "15:00:00" or "15:00"
+            parts = time_str.split(":")
+            hour = int(parts[0])
+            minute = int(parts[1]) if len(parts) > 1 else 0
+            kickoff_utc = datetime(
+                event_date.year, event_date.month, event_date.day,
+                hour, minute, tzinfo=timezone.utc
+            )
+            return now_utc >= kickoff_utc
+        # No time available — assume it hasn't kicked off
+        return False
+    except (ValueError, IndexError):
+        return False
+
+
+def _fetch_league_fixtures(
+    client: httpx.Client,
+    league_name: str,
+    league_id: int,
+    season: str,
+) -> list[dict]:
+    """
+    Fetch upcoming fixtures for one league.
+    Scans rounds to find the next round with unplayed matches.
+    """
     today = date.today()
-    logger.info(f"Fetching EPL fixtures from TheSportsDB (season={season})...")
+    fixtures = []
 
-    all_fixtures = []
+    # Start scanning from a high round (by March, most leagues are ~round 25-30)
+    start_round = max(1, 20 if today.month >= 11 or today.month <= 7 else 1)
+    for round_num in range(start_round, 39):
+        url = "https://www.thesportsdb.com/api/v1/json/3/eventsround.php"
+        params = {"id": league_id, "r": round_num, "s": season}
+        response = client.get(url, params=params)
+        response.raise_for_status()
 
-    with httpx.Client(timeout=15.0) as client:
-        # Start scanning from a high round (by March, EPL is ~round 28-30)
-        # Fall back to earlier rounds only if needed
-        start_round = max(1, 25 if today.month >= 1 else 1)
-        for round_num in range(start_round, 39):
-            url = "https://www.thesportsdb.com/api/v1/json/3/eventsround.php"
-            params = {"id": THESPORTSDB_EPL_ID, "r": round_num, "s": season}
-            response = client.get(url, params=params)
-            response.raise_for_status()
+        events = response.json().get("events") or []
+        if not events:
+            continue
 
-            events = response.json().get("events") or []
-            if not events:
-                continue
+        # Check if this round has any upcoming matches
+        has_upcoming = any(
+            not _has_kicked_off(e.get("dateEvent", ""), e.get("strTime", ""))
+            for e in events
+        )
 
-            # Check if this round has upcoming matches
-            has_upcoming = False
+        if has_upcoming:
             for event in events:
                 event_date_str = event.get("dateEvent", "")
-                try:
-                    event_date = date.fromisoformat(event_date_str)
-                except ValueError:
+                event_time_str = event.get("strTime", "")
+
+                # Skip matches that have already kicked off
+                if _has_kicked_off(event_date_str, event_time_str):
                     continue
-                # Include matches today or in the future
-                if event_date >= today:
-                    has_upcoming = True
-                    break
 
-            if has_upcoming:
-                # Found the current/next round — extract upcoming matches
-                for event in events:
-                    event_date_str = event.get("dateEvent", "")
-                    try:
-                        event_date = date.fromisoformat(event_date_str)
-                    except ValueError:
-                        continue
-                    if event_date < today:
-                        continue  # Skip already-played matches in this round
+                home = _normalise_sportsdb_team(event.get("strHomeTeam", ""))
+                away = _normalise_sportsdb_team(event.get("strAwayTeam", ""))
 
-                    home = _normalise_sportsdb_team(event.get("strHomeTeam", ""))
-                    away = _normalise_sportsdb_team(event.get("strAwayTeam", ""))
+                fixture = {
+                    "id": int(event.get("idEvent", 0)),
+                    "league": league_name,
+                    "match_date": event_date_str,
+                    "home_team": home,
+                    "away_team": away,
+                    "round": round_num,
+                    "time": event_time_str,
+                }
+                fixtures.append(fixture)
 
-                    fixture = {
-                        "id": int(event.get("idEvent", 0)),
-                        "league": "Premier League",
-                        "match_date": event_date_str,
-                        "home_team": home,
-                        "away_team": away,
-                        "round": round_num,
-                        "time": event.get("strTime", ""),
-                    }
-                    all_fixtures.append(fixture)
+            logger.info(f"  {league_name} R{round_num}: {len(fixtures)} upcoming")
+            break  # Found the active round
 
-                logger.info(f"Round {round_num}: {len(all_fixtures)} upcoming fixtures")
-                break  # Found the active round, stop scanning
+    return fixtures
 
-    logger.info(f"Found {len(all_fixtures)} upcoming EPL fixtures")
+
+def fetch_upcoming_fixtures() -> list[dict]:
+    """
+    Fetch upcoming fixtures across all supported leagues from TheSportsDB.
+    Filters out matches that have already kicked off using date + time.
+    """
+    season = _current_season_str()
+    logger.info(f"Fetching fixtures from TheSportsDB (season={season})...")
+
+    all_fixtures = []
+    with httpx.Client(timeout=15.0) as client:
+        for league_name, league_id in THESPORTSDB_LEAGUES.items():
+            try:
+                league_fixtures = _fetch_league_fixtures(
+                    client, league_name, league_id, season
+                )
+                all_fixtures.extend(league_fixtures)
+            except Exception as e:
+                logger.error(f"Failed to fetch {league_name}: {e}")
+
+    logger.info(f"Found {len(all_fixtures)} upcoming fixtures across {len(THESPORTSDB_LEAGUES)} leagues")
     return all_fixtures
 
 

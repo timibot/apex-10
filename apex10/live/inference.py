@@ -20,6 +20,7 @@ import pandas as pd
 from apex10.cache.cache_log import CacheRunLogger
 from apex10.config import APEX_ENV, LEAGUES
 from apex10.db import get_client
+from apex10.enrichment.clubelo import fetch_elo_ratings, get_elo_diff
 from apex10.models.features import (
     MARKET_FEATURES,
     ONPITCH_FEATURES,
@@ -386,10 +387,31 @@ def _build_xg_stats(db, team: str, n: int = 8) -> dict:
     }
 
 
-def build_feature_vector(fixture: dict, db) -> dict:
+def _calc_fixture_congestion(db, team: str) -> float:
+    """Calculate days since last match for fixture congestion."""
+    from datetime import date as _date
+    result = (
+        db.table("matches")
+        .select("match_date")
+        .or_(f"home_team.eq.{team},away_team.eq.{team}")
+        .eq("status", "finished")
+        .order("match_date", desc=True)
+        .limit(1)
+        .execute()
+    ).data
+    if result:
+        try:
+            last = _date.fromisoformat(result[0]["match_date"])
+            return (_date.today() - last).days
+        except (ValueError, KeyError):
+            pass
+    return 7.0  # default
+
+
+def build_feature_vector(fixture: dict, db, elo_ratings: dict | None = None) -> dict:
     """
-    Build the full 46-feature vector for one upcoming fixture.
-    Uses real rolling stats where available, stubs for the rest.
+    Build the full feature vector for one upcoming fixture.
+    Uses real rolling stats + Elo + congestion where available, stubs for the rest.
     """
     home_team = fixture["home_team"]
     away_team = fixture["away_team"]
@@ -420,6 +442,14 @@ def build_feature_vector(fixture: dict, db) -> dict:
     features["goals_conceded_avg_away"] = away_stats["goals_conceded_avg"]
     features["clean_sheet_rate_home"] = home_stats["clean_sheet_rate"]
     features["clean_sheet_rate_away"] = away_stats["clean_sheet_rate"]
+
+    # Enriched features — Elo
+    if elo_ratings:
+        features["elo_diff"] = get_elo_diff(elo_ratings, home_team, away_team)
+
+    # Enriched features — fixture congestion
+    features["fixture_congestion_home"] = _calc_fixture_congestion(db, home_team)
+    features["fixture_congestion_away"] = _calc_fixture_congestion(db, away_team)
 
     return features
 
@@ -468,6 +498,9 @@ def run_inference() -> dict:
 
     db = get_client()
 
+    # Fetch Elo ratings once for all fixtures
+    elo_ratings = fetch_elo_ratings()
+
     with CacheRunLogger(db) as cache_log:
         # Fetch upcoming fixtures from TheSportsDB
         fixtures = fetch_upcoming_fixtures()
@@ -498,7 +531,7 @@ def run_inference() -> dict:
 
             for fixture in league_fixtures:
                 try:
-                    features = build_feature_vector(fixture, db)
+                    features = build_feature_vector(fixture, db, elo_ratings=elo_ratings)
                     probs = score_fixture(features, models)
 
                     best_odds = features.get("odds_opening_home", 1.5)

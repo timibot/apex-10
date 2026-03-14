@@ -21,6 +21,7 @@ from apex10.cache.cache_log import CacheRunLogger
 from apex10.config import APEX_ENV, LEAGUES
 from apex10.db import get_client
 from apex10.enrichment.clubelo import fetch_elo_ratings, get_elo_diff
+from apex10.enrichment.odds_api import fetch_live_odds, get_match_odds
 from apex10.models.features import (
     MARKET_FEATURES,
     ONPITCH_FEATURES,
@@ -408,7 +409,7 @@ def _calc_fixture_congestion(db, team: str) -> float:
     return 7.0  # default
 
 
-def build_feature_vector(fixture: dict, db, elo_ratings: dict | None = None) -> dict:
+def build_feature_vector(fixture: dict, db, elo_ratings: dict | None = None, live_odds: dict | None = None) -> dict:
     """
     Build the full feature vector for one upcoming fixture.
     Uses real rolling stats + Elo + congestion where available, stubs for the rest.
@@ -450,6 +451,14 @@ def build_feature_vector(fixture: dict, db, elo_ratings: dict | None = None) -> 
     # Enriched features — fixture congestion
     features["fixture_congestion_home"] = _calc_fixture_congestion(db, home_team)
     features["fixture_congestion_away"] = _calc_fixture_congestion(db, away_team)
+
+    # Enriched features — live odds
+    if live_odds:
+        match_odds = get_match_odds(live_odds, home_team, away_team)
+        if match_odds:
+            features["odds_opening_home"] = match_odds["home"]
+            features["odds_current_home"] = match_odds["home"]
+            features["odds_movement"] = 0.0  # opening == current for now
 
     return features
 
@@ -501,6 +510,9 @@ def run_inference() -> dict:
     # Fetch Elo ratings once for all fixtures
     elo_ratings = fetch_elo_ratings()
 
+    # Fetch live odds once for all fixtures (costs ~5 credits for 5 leagues)
+    live_odds = fetch_live_odds()
+
     with CacheRunLogger(db) as cache_log:
         # Fetch upcoming fixtures from TheSportsDB
         fixtures = fetch_upcoming_fixtures()
@@ -531,7 +543,7 @@ def run_inference() -> dict:
 
             for fixture in league_fixtures:
                 try:
-                    features = build_feature_vector(fixture, db, elo_ratings=elo_ratings)
+                    features = build_feature_vector(fixture, db, elo_ratings=elo_ratings, live_odds=live_odds)
                     probs = score_fixture(features, models)
 
                     best_odds = features.get("odds_opening_home", 1.5)

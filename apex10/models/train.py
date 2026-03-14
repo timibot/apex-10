@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 
 MODEL_DIR = Path(__file__).parent.parent.parent / "models"
 
+# Sanitise league name for filesystem paths ("La Liga" → "La_Liga")
+def _league_dir(league: str) -> Path:
+    safe = league.replace(" ", "_")
+    d = MODEL_DIR / safe
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
 
 def run_training(league: str = "EPL", n_trials: int = MODEL.OPTUNA_TRIALS) -> dict:
     """
@@ -129,12 +136,12 @@ def run_training(league: str = "EPL", n_trials: int = MODEL.OPTUNA_TRIALS) -> di
 
     # ── 9. Serialise models to disk ───────────────────────────────────────
     logger.info("Step 9: Serialising models")
-    MODEL_DIR.mkdir(exist_ok=True)
-    joblib.dump(lgbm, MODEL_DIR / "lgbm_latest.joblib")
-    joblib.dump(xgb, MODEL_DIR / "xgb_latest.joblib")
-    joblib.dump(lgbm_cal, MODEL_DIR / "lgbm_calibrator.joblib")
-    joblib.dump(xgb_cal, MODEL_DIR / "xgb_calibrator.joblib")
-    logger.info(f"Models saved to {MODEL_DIR}")
+    league_dir = _league_dir(league)
+    joblib.dump(lgbm, league_dir / "lgbm_latest.joblib")
+    joblib.dump(xgb, league_dir / "xgb_latest.joblib")
+    joblib.dump(lgbm_cal, league_dir / "lgbm_calibrator.joblib")
+    joblib.dump(xgb_cal, league_dir / "xgb_calibrator.joblib")
+    logger.info(f"Models saved to {league_dir}")
 
     # ── 10. Store params in Supabase ──────────────────────────────────────
     logger.info("Step 10: Storing model params")
@@ -151,6 +158,7 @@ def run_training(league: str = "EPL", n_trials: int = MODEL.OPTUNA_TRIALS) -> di
     ]:
         db.table("model_params").insert({
             "model_name": model_name,
+            "league": league,
             "version": next_version,
             "params": params,
             "brier_score": brier,
@@ -184,8 +192,27 @@ def run_training(league: str = "EPL", n_trials: int = MODEL.OPTUNA_TRIALS) -> di
     return summary
 
 
-if __name__ == "__main__":
-    result = run_training()
-    if not result["passed"]:
-        raise SystemExit(1)
+ALL_LEAGUES = ["EPL", "La Liga", "Bundesliga", "Serie A", "Ligue 1"]
 
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1:
+        league_arg = sys.argv[1]
+        if league_arg == "--all":
+            for lg in ALL_LEAGUES:
+                logger.info(f"\n{'='*60}\n  Training {lg}\n{'='*60}")
+                try:
+                    result = run_training(league=lg)
+                    if not result["passed"]:
+                        logger.error(f"{lg} failed Brier gate")
+                except Exception as e:
+                    logger.error(f"{lg} training failed: {e}")
+        else:
+            result = run_training(league=league_arg)
+            if not result["passed"]:
+                raise SystemExit(1)
+    else:
+        result = run_training()
+        if not result["passed"]:
+            raise SystemExit(1)

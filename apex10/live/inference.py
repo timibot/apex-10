@@ -39,6 +39,16 @@ THESPORTSDB_LEAGUES = {
     "Ligue 1": 4334,
 }
 
+# Map TheSportsDB league names → model directory names
+# These must match what train.py uses as league param
+LEAGUE_DIR_MAP = {
+    "Premier League": "EPL",
+    "La Liga": "La_Liga",
+    "Bundesliga": "Bundesliga",
+    "Serie A": "Serie_A",
+    "Ligue 1": "Ligue_1",
+}
+
 # Team name mapping: TheSportsDB → normalised convention
 SPORTSDB_TEAM_MAP = {
     # England
@@ -107,17 +117,38 @@ STUB_DEFAULTS = {
 }
 
 
-def load_models() -> dict:
-    """Load serialised models and calibrators from disk."""
+def _league_model_dir(league: str) -> Path:
+    """Get model directory for a specific league."""
+    dir_name = LEAGUE_DIR_MAP.get(league, league.replace(" ", "_"))
+    return MODEL_DIR / dir_name
+
+
+def load_models(league: str) -> dict | None:
+    """
+    Load serialised models and calibrators for a specific league.
+    Returns None if mandatory models (lgbm, xgb) are not found.
+    """
+    league_dir = _league_model_dir(league)
+    if not league_dir.exists():
+        logger.warning(f"No model directory for {league}: {league_dir}")
+        return None
+
     models = {}
+    mandatory_found = True
     for name in ["lgbm_latest", "xgb_latest", "lgbm_calibrator", "xgb_calibrator"]:
-        path = MODEL_DIR / f"{name}.joblib"
+        path = league_dir / f"{name}.joblib"
         if path.exists():
             models[name] = joblib.load(path)
-            logger.info(f"Loaded {name}")
         else:
-            logger.warning(f"Model not found: {path}")
             models[name] = None
+            if name in ("lgbm_latest", "xgb_latest"):
+                mandatory_found = False
+
+    if not mandatory_found:
+        logger.warning(f"Missing mandatory models for {league}")
+        return None
+
+    logger.info(f"Loaded models for {league}")
     return models
 
 
@@ -178,8 +209,23 @@ def _fetch_league_fixtures(
     for round_num in range(start_round, 39):
         url = "https://www.thesportsdb.com/api/v1/json/3/eventsround.php"
         params = {"id": league_id, "r": round_num, "s": season}
-        response = client.get(url, params=params)
-        response.raise_for_status()
+
+        import time as _time
+        _time.sleep(1.5)  # Rate limit: TheSportsDB free tier
+
+        # Retry on 429 with backoff
+        for attempt in range(3):
+            response = client.get(url, params=params)
+            if response.status_code == 429:
+                wait = 5 * (attempt + 1)
+                logger.warning(f"Rate limited, waiting {wait}s (attempt {attempt+1}/3)")
+                _time.sleep(wait)
+                continue
+            response.raise_for_status()
+            break
+        else:
+            logger.warning(f"Giving up on {league_name} R{round_num} after 3 rate limit retries")
+            break
 
         events = response.json().get("events") or []
         if not events:
@@ -411,9 +457,9 @@ def score_fixture(features: dict, models: dict) -> dict:
 def run_inference() -> dict:
     """
     Full inference pipeline:
-    1. Load models
-    2. Fetch upcoming fixtures from TheSportsDB
-    3. Score each fixture
+    1. Fetch upcoming fixtures from TheSportsDB (all leagues)
+    2. Group by league, load per-league models
+    3. Score each fixture with its league's model pair
     4. Write to upcoming_fixtures table
     5. Log cache run
     """
@@ -421,10 +467,6 @@ def run_inference() -> dict:
     logger.info(f"═══ APEX-10 Inference Engine ({APEX_ENV}) ═══")
 
     db = get_client()
-    models = load_models()
-
-    if models["lgbm_latest"] is None or models["xgb_latest"] is None:
-        raise RuntimeError("Models not found — run training first: python -m apex10.models.train")
 
     with CacheRunLogger(db) as cache_log:
         # Fetch upcoming fixtures from TheSportsDB
@@ -435,43 +477,58 @@ def run_inference() -> dict:
             logger.warning("No upcoming fixtures found")
             return {"fixtures": 0, "scored": 0}
 
+        # Group fixtures by league
+        from collections import defaultdict
+        by_league = defaultdict(list)
+        for f in fixtures:
+            by_league[f["league"]].append(f)
+
         scored = []
-        for fixture in fixtures:
-            try:
-                # Build features from historical data
-                features = build_feature_vector(fixture, db)
+        leagues_loaded = set()
+        leagues_skipped = set()
 
-                # Score with both models
-                probs = score_fixture(features, models)
+        for league_name, league_fixtures in by_league.items():
+            models = load_models(league_name)
+            if models is None:
+                logger.warning(f"⚠️ Skipping {league_name} — no trained models")
+                leagues_skipped.add(league_name)
+                continue
 
-                best_odds = features.get("odds_opening_home", 1.5)
+            leagues_loaded.add(league_name)
 
-                row = {
-                    "api_match_id": fixture["id"],
-                    "league": fixture["league"],
-                    "match_date": fixture["match_date"],
-                    "home_team": fixture["home_team"],
-                    "away_team": fixture["away_team"],
-                    "lgbm_prob": probs["lgbm_prob"],
-                    "xgb_prob": probs["xgb_prob"],
-                    "consensus_prob": probs["consensus_prob"],
-                    "best_bet_type": "Home Win",
-                    "best_bet_odds": best_odds,
-                    "opening_odds": best_odds,
-                    "key_player_absent_home": 0,
-                    "key_player_absent_away": 0,
-                    "features_complete": True,
-                }
-                scored.append(row)
-                logger.info(
-                    f"  {fixture['home_team']} vs {fixture['away_team']}: "
-                    f"LGBM={probs['lgbm_prob']:.3f} XGB={probs['xgb_prob']:.3f} "
-                    f"consensus={probs['consensus_prob']:.3f}"
-                )
+            for fixture in league_fixtures:
+                try:
+                    features = build_feature_vector(fixture, db)
+                    probs = score_fixture(features, models)
 
-            except Exception as e:
-                logger.error(f"Failed to score {fixture.get('home_team','?')} vs {fixture.get('away_team','?')}: {e}")
-                cache_log.add_source_failure("inference", str(e))
+                    best_odds = features.get("odds_opening_home", 1.5)
+
+                    row = {
+                        "api_match_id": fixture["id"],
+                        "league": fixture["league"],
+                        "match_date": fixture["match_date"],
+                        "home_team": fixture["home_team"],
+                        "away_team": fixture["away_team"],
+                        "lgbm_prob": probs["lgbm_prob"],
+                        "xgb_prob": probs["xgb_prob"],
+                        "consensus_prob": probs["consensus_prob"],
+                        "best_bet_type": "Home Win",
+                        "best_bet_odds": best_odds,
+                        "opening_odds": best_odds,
+                        "key_player_absent_home": 0,
+                        "key_player_absent_away": 0,
+                        "features_complete": True,
+                    }
+                    scored.append(row)
+                    logger.info(
+                        f"  [{league_name}] {fixture['home_team']} vs {fixture['away_team']}: "
+                        f"LGBM={probs['lgbm_prob']:.3f} XGB={probs['xgb_prob']:.3f} "
+                        f"consensus={probs['consensus_prob']:.3f}"
+                    )
+
+                except Exception as e:
+                    logger.error(f"Failed to score {fixture.get('home_team','?')} vs {fixture.get('away_team','?')}: {e}")
+                    cache_log.add_source_failure("inference", str(e))
 
         # Upsert to upcoming_fixtures
         if scored:
@@ -480,9 +537,14 @@ def run_inference() -> dict:
             ).execute()
             logger.info(f"Wrote {len(scored)} scored fixtures to upcoming_fixtures")
 
+        if leagues_skipped:
+            logger.warning(f"Leagues skipped (no models): {leagues_skipped}")
+
     summary = {
         "fixtures_found": len(fixtures),
         "scored": len(scored),
+        "leagues_scored": list(leagues_loaded),
+        "leagues_skipped": list(leagues_skipped),
         "environment": APEX_ENV,
     }
     logger.info(f"═══ Inference complete ═══ {summary}")

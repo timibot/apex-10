@@ -15,7 +15,9 @@ from apex10.db import get_client
 
 logger = logging.getLogger(__name__)
 
-BACKFILL_SEASONS = [2021, 2022, 2023, 2024, 2025]
+BACKFILL_SEASONS = [2022, 2023, 2024]  # API-Football free plan: 2022-2024
+
+ALL_LEAGUES = ["EPL", "La Liga", "Bundesliga", "Serie A", "Ligue 1"]
 
 
 def run_full_backfill(league_name: str = "EPL") -> dict:
@@ -74,7 +76,33 @@ def run_full_backfill(league_name: str = "EPL") -> dict:
     return summary
 
 
+def run_all_leagues() -> dict:
+    """Run backfill for every league in ALL_LEAGUES."""
+    results = {}
+    for league in ALL_LEAGUES:
+        logger.info(f"\n{'='*60}\n  Backfilling {league}\n{'='*60}")
+        try:
+            results[league] = run_full_backfill(league)
+        except Exception as e:
+            logger.error(f"Failed to backfill {league}: {e}")
+            results[league] = {"errors": [str(e)]}
+    return results
+
+
 if __name__ == "__main__":
+    import sys
     logging.basicConfig(level=logging.INFO)
-    result = run_full_backfill("EPL")
-    print(result)
+
+    if len(sys.argv) > 1:
+        league = sys.argv[1]
+        result = run_full_backfill(league)
+        print(result)
+    else:
+        # Run all leagues
+        results = run_all_leagues()
+        for league, summary in results.items():
+            errors = summary.get("errors", [])
+            print(f"\n{league}: matches={summary.get('matches','-')} "
+                  f"odds={summary.get('odds','-')} xg={summary.get('xg','-')} "
+                  f"errors={len(errors)}")
+

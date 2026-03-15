@@ -244,18 +244,62 @@ def run_all_gates(
         if rejected:
             continue
 
-        # Gate 6: stateful
+        # Gate 6: stateful — league cap with swap logic
         g6 = gate_6_correlation(c, league_counts)
         if not g6.passed:
-            rejection_log.append({
-                "fixture_id": c.fixture_id,
-                "home_team": c.home_team,
-                "away_team": c.away_team,
-                "gate": 6,
-                "gate_name": "correlation",
-                "reason": g6.reason,
-            })
-            continue
+            # Swap logic: if this candidate has MORE votes than the
+            # weakest qualified leg from the same league, sub it in.
+            same_league = [
+                (i, q) for i, q in enumerate(qualified)
+                if q.league == c.league
+            ]
+            if same_league:
+                # Find the weakest (lowest votes, then lowest odds)
+                weakest_idx, weakest = min(
+                    same_league,
+                    key=lambda x: (x[1].confidence_votes, x[1].odds),
+                )
+                if c.confidence_votes > weakest.confidence_votes:
+                    # Swap: remove weakest, add this candidate
+                    logger.info(
+                        f"Gate 6 swap: {c.home_team} vs {c.away_team} "
+                        f"({c.confidence_votes}/5) replaces "
+                        f"{weakest.home_team} vs {weakest.away_team} "
+                        f"({weakest.confidence_votes}/5) in {c.league}"
+                    )
+                    rejection_log.append({
+                        "fixture_id": weakest.fixture_id,
+                        "home_team": weakest.home_team,
+                        "away_team": weakest.away_team,
+                        "gate": 6,
+                        "gate_name": "correlation_swap",
+                        "reason": (
+                            f"Swapped out for {c.home_team} vs {c.away_team} "
+                            f"({c.confidence_votes}/5 > {weakest.confidence_votes}/5)"
+                        ),
+                    })
+                    qualified.pop(weakest_idx)
+                    # Don't change league_counts — still 3 legs
+                else:
+                    rejection_log.append({
+                        "fixture_id": c.fixture_id,
+                        "home_team": c.home_team,
+                        "away_team": c.away_team,
+                        "gate": 6,
+                        "gate_name": "correlation",
+                        "reason": g6.reason,
+                    })
+                    continue
+            else:
+                rejection_log.append({
+                    "fixture_id": c.fixture_id,
+                    "home_team": c.home_team,
+                    "away_team": c.away_team,
+                    "gate": 6,
+                    "gate_name": "correlation",
+                    "reason": g6.reason,
+                })
+                continue
 
         # Passed all gates
         league_counts[c.league] = league_counts.get(c.league, 0) + 1

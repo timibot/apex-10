@@ -59,26 +59,53 @@ MARKETS = [
 ]
 
 
+# Per-market Poisson probability thresholds
+# Tuned to each market's natural probability range
+POISSON_THRESHOLDS = {
+    "home_win":   0.55,  # ~40-60% typical
+    "away_win":   0.45,  # ~20-40% typical
+    "dc_1x":      0.65,  # ~55-75% typical
+    "dc_x2":      0.55,  # ~45-65% typical
+    "dnb_home":   0.55,  # ~45-60% typical
+    "dnb_away":   0.45,  # ~25-45% typical
+    "over_1_5":   0.65,  # ~70-85% typical
+    "over_2_5":   0.50,  # ~40-60% typical
+    "under_3_5":  0.65,  # ~60-80% typical
+    "btts_yes":   0.50,  # ~45-60% typical
+    "btts_no":    0.50,  # ~40-55% typical
+}
+
+
 def _get_market_odds(
     market_key: str,
     match_odds: dict | None,
+    dc_probs: dict | None = None,
 ) -> float | None:
-    """Get bookmaker odds for a market. Returns None if unavailable."""
+    """
+    Get bookmaker odds for a market.
+
+    Priority:
+    1. Direct odds from Odds API
+    2. Derived from h2h odds (DC, DNB)
+    3. Derived via vig-ratio from related market
+       (Over 1.5, Under 3.5 from Over 2.5)
+    """
     if not match_odds:
         return None
 
-    # Direct odds from Odds API
+    # 1. Direct odds from Odds API
     DIRECT_MAP = {
         "home_win": "home",
         "away_win": "away",
         "over_1_5": "over_1_5",
         "over_2_5": "over_2_5",
+        "under_2_5": "under_2_5",
         "under_3_5": "under_3_5",
     }
     if market_key in DIRECT_MAP and match_odds.get(DIRECT_MAP[market_key]):
         return match_odds[DIRECT_MAP[market_key]]
 
-    # Derived odds from h2h
+    # 2. Derived from h2h odds
     h = match_odds.get("home", 0)
     d = match_odds.get("draw", 0)
     a = match_odds.get("away", 0)
@@ -103,9 +130,33 @@ def _get_market_odds(
         dnb = p_away / (p_home + p_away)
         return round(1.0 / dnb, 3) if dnb > 0 else None
 
-    # BTTS — derive from totals if available, else skip
+    # 3. Vig-ratio derivation from Over 2.5
+    #    Bookmaker vig = (bookmaker implied prob) / (model prob)
+    #    Applied to target market: target_odds = 1 / (model_target_prob * vig)
+    if dc_probs and market_key in ("over_1_5", "under_3_5", "under_2_5"):
+        bookie_o25_odds = match_odds.get("over_2_5")
+        model_o25 = dc_probs.get("over_2_5", 0)
+
+        if bookie_o25_odds and bookie_o25_odds > 1.0 and model_o25 > 0.05:
+            bookie_implied = 1.0 / bookie_o25_odds
+            vig_ratio = bookie_implied / model_o25  # typically 0.85-0.95
+
+            target_model_prob = dc_probs.get(market_key, 0)
+            if target_model_prob > 0.05:
+                adjusted_prob = target_model_prob * vig_ratio
+                # Clamp to avoid impossible odds
+                adjusted_prob = min(max(adjusted_prob, 0.05), 0.98)
+                derived_odds = round(1.0 / adjusted_prob, 2)
+                if derived_odds > 1.0:
+                    logger.debug(
+                        f"Derived {market_key} odds: {derived_odds:.2f} "
+                        f"(vig={vig_ratio:.3f}, model={target_model_prob:.3f})"
+                    )
+                    return derived_odds
+
+    # BTTS — no reliable derivation yet
     if market_key in ("btts_yes", "btts_no"):
-        return None  # No direct BTTS odds from API yet
+        return None
 
     return None
 
@@ -124,8 +175,9 @@ def _vote_signals(
     """
     signals = {}
 
-    # Signal 1: Dixon-Coles probability ≥ 0.70
-    signals["poisson"] = dc_prob >= 0.70
+    # Signal 1: Dixon-Coles probability ≥ market-specific threshold
+    threshold = POISSON_THRESHOLDS.get(market_key, 0.60)
+    signals["poisson"] = dc_prob >= threshold
 
     # Signal 2: Form alignment
     home_form = features.get("form_pts_home_l5", 0)
@@ -204,10 +256,9 @@ def score_all_markets(
         if dc_prob < 0.01:
             continue
 
-        odds = _get_market_odds(prob_key, match_odds)
+        odds = _get_market_odds(prob_key, match_odds, dc_probs)
         if odds is None or odds <= 1.0:
-            # No real bookmaker odds — skip this market entirely
-            # Never derive fake odds from model probability
+            # No real or derivable bookmaker odds — skip
             continue
 
         signals = _vote_signals(prob_key, direction, dc_prob, odds, features, elo_diff)

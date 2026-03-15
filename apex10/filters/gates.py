@@ -85,7 +85,7 @@ class GateResult:
 
 def gate_1_odds_range(c: Candidate) -> GateResult:
     """Gate 1: Odds must be in acceptable accumulator range."""
-    min_odds = 1.20
+    min_odds = 1.10
     max_odds = 1.50
     passed = min_odds <= c.odds <= max_odds
     return GateResult(

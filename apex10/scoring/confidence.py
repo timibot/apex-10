@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 # Odds range for accumulator legs
-ODDS_MIN = 1.20
+ODDS_MIN = 1.10
 ODDS_MAX = 1.50
 
 
@@ -283,7 +283,7 @@ def pick_best_bet(
     match_odds: dict | None,
     elo_diff: float = 0.0,
     min_votes: int = 3,
-    odds_range: tuple[float, float] = (1.20, 1.50),
+    odds_range: tuple[float, float] = (1.10, 1.50),
 ) -> MarketPick | None:
     """
     Pick the single best bet for a fixture.

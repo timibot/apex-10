@@ -206,10 +206,9 @@ def score_all_markets(
 
         odds = _get_market_odds(prob_key, match_odds)
         if odds is None or odds <= 1.0:
-            # No bookmaker odds — derive fair odds from model
-            odds = round(1.0 / dc_prob, 3) if dc_prob > 0 else None
-            if odds is None:
-                continue
+            # No real bookmaker odds — skip this market entirely
+            # Never derive fake odds from model probability
+            continue
 
         signals = _vote_signals(prob_key, direction, dc_prob, odds, features, elo_diff)
         votes = sum(1 for v in signals.values() if v)
@@ -247,11 +246,6 @@ def pick_best_bet(
 
     for pick in all_picks:
         if pick.votes >= min_votes and odds_range[0] <= pick.odds <= odds_range[1]:
-            return pick
-
-    # Fallback: return best pick regardless of odds range if it has enough votes
-    for pick in all_picks:
-        if pick.votes >= min_votes:
             return pick
 
     return None

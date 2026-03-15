@@ -65,6 +65,8 @@ def get_week_candidates(db, week_start: date) -> list[Candidate]:
                     row.get("key_player_absent_away", 0)
                 ),
                 features_complete=bool(row.get("features_complete", True)),
+                # Votes encoded in xgb_prob as votes/5.0 by inference
+                confidence_votes=round(float(row.get("xgb_prob", 0)) * 5),
             )
             candidates.append(c)
         except (KeyError, TypeError, ValueError) as e:

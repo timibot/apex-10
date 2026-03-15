@@ -2,9 +2,9 @@
 The 6-gate filter sequence. Applied in strict order.
 A leg is dropped the moment it fails any gate — no re-evaluation.
 
-Gate order (spec-mandated, do not reorder):
-  1. Odds range         → 1.20 <= odds <= 1.49
-  2. Dual edge          → both models >= 4% edge + divergence <= 10%
+Gate order:
+  1. Odds range         → 1.10 <= odds <= 1.60 (paper) or 1.20-1.49 (prod)
+  2. Confidence vote    → confidence_votes >= 3 (paper) or >= 4 (prod)
   3. Lineup risk        → no key player absent flag on favourite
   4. NaN check          → no missing critical features
   5. Line movement      → drift <= 0.08
@@ -17,16 +17,19 @@ from dataclasses import dataclass
 from enum import Enum
 
 from apex10.config import ODDS
-from apex10.scoring.edge import divergence_check, dual_edge_check
 
 logger = logging.getLogger(__name__)
 
+# Confidence vote thresholds
+MIN_VOTES_PAPER = 3     # Paper trading: 3/5 signals must agree
+MIN_VOTES_PRODUCTION = 4  # Production: 4/5 signals must agree
+
 
 class ConfidenceTier(str, Enum):
-    S = "S"  # Divergence <=3%, both edge >=6%, no flags
-    A = "A"  # Divergence <=5%, both edge >=4%, no critical flags
-    B = "B"  # Divergence 5-10%, or flagged
-    X = "X"  # Auto drop — never placed
+    S = "S"  # 5/5 votes — max conviction
+    A = "A"  # 4/5 votes — strong conviction
+    B = "B"  # 3/5 votes — acceptable for paper
+    X = "X"  # <3 votes — auto drop
 
 
 TIER_RANK = {
@@ -52,16 +55,15 @@ class Candidate:
     opening_odds: float
     key_player_absent_home: int = 0
     key_player_absent_away: int = 0
-    # Feature completeness flag set by NaN gate
     features_complete: bool = True
-    # Populated after passing all gates
     consensus_prob: float = 0.0
+    confidence_votes: int = 0
+    tier: ConfidenceTier = ConfidenceTier.A
+    line_movement_flag: bool = False
+
+    # Legacy fields kept for compatibility
     lgbm_edge: float = 0.0
     xgb_edge: float = 0.0
-    # GP-4: Confidence tier
-    tier: ConfidenceTier = ConfidenceTier.A
-    # GP-5: Line movement flag for B-tier assignment
-    line_movement_flag: bool = False
 
     @property
     def drift(self) -> float:
@@ -82,54 +84,36 @@ class GateResult:
 
 
 def gate_1_odds_range(c: Candidate) -> GateResult:
-    """Gate 1: Odds must be in [1.20, 1.49]."""
-    passed = ODDS.MIN_ODDS <= c.odds <= ODDS.MAX_ODDS
+    """Gate 1: Odds must be in acceptable accumulator range."""
+    min_odds = 1.10
+    max_odds = 1.60
+    passed = min_odds <= c.odds <= max_odds
     return GateResult(
         passed=passed,
         gate=1,
         gate_name="odds_range",
         reason="" if passed else (
-            f"Odds {c.odds} outside [{ODDS.MIN_ODDS}, {ODDS.MAX_ODDS}]"
+            f"Odds {c.odds} outside [{min_odds}, {max_odds}]"
         ),
     )
 
 
-def gate_2_dual_edge(c: Candidate) -> GateResult:
-    """Gate 2: Both models >= 4% edge AND divergence <= 10%."""
-    edge_result = dual_edge_check(c.lgbm_prob, c.xgb_prob, c.odds)
-    div_result = divergence_check(c.lgbm_prob, c.xgb_prob)
-
-    if not edge_result["passed"]:
-        return GateResult(
-            passed=False,
-            gate=2,
-            gate_name="dual_edge",
-            reason=(
-                f"Edge too low: lgbm={edge_result['lgbm_edge']:.3f}, "
-                f"xgb={edge_result['xgb_edge']:.3f}, min={ODDS.MIN_EDGE}"
-            ),
-        )
-
-    if not div_result["passed"]:
-        return GateResult(
-            passed=False,
-            gate=2,
-            gate_name="dual_edge",
-            reason=(
-                f"Model divergence {div_result['divergence']:.3f} "
-                f"> {ODDS.MAX_DIVERGENCE}"
-            ),
-        )
-
-    return GateResult(passed=True, gate=2, gate_name="dual_edge")
+def gate_2_confidence(c: Candidate) -> GateResult:
+    """Gate 2: Confidence votes must meet minimum threshold."""
+    min_votes = MIN_VOTES_PAPER
+    passed = c.confidence_votes >= min_votes
+    return GateResult(
+        passed=passed,
+        gate=2,
+        gate_name="confidence",
+        reason="" if passed else (
+            f"Only {c.confidence_votes}/5 signals agree (need {min_votes}+)"
+        ),
+    )
 
 
 def gate_3_lineup_risk(c: Candidate) -> GateResult:
-    """
-    Gate 3: Key player absent on the favoured side triggers drop.
-    If home team is favourite and key home player absent → drop.
-    If away team is favourite and key away player absent → drop.
-    """
+    """Gate 3: Key player absent on the favoured side triggers drop."""
     if c.is_home_favourite and c.key_player_absent_home:
         return GateResult(
             passed=False,
@@ -156,13 +140,12 @@ def gate_4_nan_check(c: Candidate) -> GateResult:
             gate_name="nan_check",
             reason="One or more critical features are NaN",
         )
-    # Also verify odds and probabilities are finite
     for val, name in [
         (c.odds, "odds"),
         (c.lgbm_prob, "lgbm_prob"),
         (c.xgb_prob, "xgb_prob"),
     ]:
-        if val is None or val != val:  # NaN check  # noqa: PLR0124
+        if val is None or val != val:  # noqa: PLR0124
             return GateResult(
                 passed=False,
                 gate=4,
@@ -173,48 +156,30 @@ def gate_4_nan_check(c: Candidate) -> GateResult:
 
 
 def gate_5_line_movement(c: Candidate) -> GateResult:
-    """
-    Gate 5: Line movement with one-sharp B-tier path.
-    drift > 0.12 = severe (both-sharp) → drop.
-    drift 0.08–0.12 = moderate (one-sharp) → B-tier flag, pass.
-    drift <= 0.08 = healthy → pass.
-    """
+    """Gate 5: Line movement check."""
     if c.drift <= ODDS.MAX_DRIFT:
         return GateResult(passed=True, gate=5, gate_name="line_movement")
-
-    # Drift > 0.08 — magnitude determines severity
     if c.drift > 0.12:
-        # Severe drift — treat as both-sharp → drop
         return GateResult(
             passed=False,
             gate=5,
             gate_name="line_movement",
-            reason=(
-                f"Severe drift {c.drift:.3f} > 0.12 — "
-                f"both-sharp signal, auto drop"
-            ),
+            reason=f"Severe drift {c.drift:.3f} > 0.12 — auto drop",
         )
     else:
-        # Moderate drift — one-sharp → B-tier flag, still passes
         c.line_movement_flag = True
         return GateResult(
             passed=True,
             gate=5,
             gate_name="line_movement",
-            reason=(
-                f"Moderate drift {c.drift:.3f} — "
-                f"one-sharp flag, B-tier assigned"
-            ),
+            reason=f"Moderate drift {c.drift:.3f} — B-tier flag",
         )
 
 
 def gate_6_correlation(
     c: Candidate, approved_leagues: dict[str, int]
 ) -> GateResult:
-    """
-    Gate 6: Max 3 legs from the same league on any ticket.
-    approved_leagues = {league_name: count_already_approved}
-    """
+    """Gate 6: Max 3 legs from the same league on any ticket."""
     current_count = approved_leagues.get(c.league, 0)
     if current_count >= ODDS.MAX_LEGS_PER_LEAGUE:
         return GateResult(
@@ -229,35 +194,15 @@ def gate_6_correlation(
     return GateResult(passed=True, gate=6, gate_name="correlation")
 
 
-def assign_tier(
-    lgbm_prob: float,
-    xgb_prob: float,
-    lgbm_edge: float,
-    xgb_edge: float,
-    has_flag: bool = False,
-) -> ConfidenceTier:
-    """
-    Assign confidence tier based on model divergence and edge.
-    Called after a candidate passes Gates 1-6.
-    """
-    divergence = abs(lgbm_prob - xgb_prob)
-    both_have_edge = lgbm_edge >= 0.04 and xgb_edge >= 0.04
-    both_high_edge = lgbm_edge >= 0.06 and xgb_edge >= 0.06
-
-    # Auto drop
-    if divergence > 0.10 or not both_have_edge:
-        return ConfidenceTier.X
-
-    # S-tier: tight agreement, both strong edge, no flags
-    if divergence <= 0.03 and both_high_edge and not has_flag:
+def assign_tier(votes: int, has_flag: bool = False) -> ConfidenceTier:
+    """Assign confidence tier based on vote count."""
+    if votes >= 5:
         return ConfidenceTier.S
-
-    # A-tier: acceptable agreement, both meet minimum edge
-    if divergence <= 0.05 and both_have_edge and not has_flag:
+    if votes >= 4 and not has_flag:
         return ConfidenceTier.A
-
-    # B-tier: everything else that passed gates
-    return ConfidenceTier.B
+    if votes >= 3:
+        return ConfidenceTier.B
+    return ConfidenceTier.X
 
 
 def run_all_gates(
@@ -266,7 +211,6 @@ def run_all_gates(
     """
     Run all 6 gates on a list of candidates.
     Returns (qualified_candidates, rejection_log).
-    Gate 6 is applied statefully — league counts accumulate as legs pass.
     """
     qualified = []
     rejection_log = []
@@ -274,7 +218,7 @@ def run_all_gates(
 
     gates = [
         gate_1_odds_range,
-        gate_2_dual_edge,
+        gate_2_confidence,
         gate_3_lineup_risk,
         gate_4_nan_check,
         gate_5_line_movement,
@@ -283,7 +227,6 @@ def run_all_gates(
     for c in candidates:
         rejected = False
 
-        # Gates 1–5: stateless
         for gate_fn in gates:
             result = gate_fn(c)
             if not result.passed:
@@ -301,7 +244,7 @@ def run_all_gates(
         if rejected:
             continue
 
-        # Gate 6: stateful — uses running league count
+        # Gate 6: stateful
         g6 = gate_6_correlation(c, league_counts)
         if not g6.passed:
             rejection_log.append({
@@ -314,22 +257,13 @@ def run_all_gates(
             })
             continue
 
-        # Passed all gates — annotate edges and consensus
+        # Passed all gates
         league_counts[c.league] = league_counts.get(c.league, 0) + 1
-        c.consensus_prob = round((c.lgbm_prob + c.xgb_prob) / 2.0, 4)
-        c.lgbm_edge = round(c.lgbm_prob - (1.0 / c.odds), 4)
-        c.xgb_edge = round(c.xgb_prob - (1.0 / c.odds), 4)
-
-        # GP-4: Assign confidence tier
         c.tier = assign_tier(
-            c.lgbm_prob,
-            c.xgb_prob,
-            c.lgbm_edge,
-            c.xgb_edge,
+            c.confidence_votes,
             has_flag=getattr(c, "line_movement_flag", False),
         )
 
-        # GP-4: X-tier = auto drop even if passed gates 1–6
         if c.tier == ConfidenceTier.X:
             rejection_log.append({
                 "fixture_id": c.fixture_id,

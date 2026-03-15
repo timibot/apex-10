@@ -122,17 +122,24 @@ def derive_probabilities(
     # ── Team to Score 1+ ─────────────────────────────────────────────────
     home_scores = 1.0 - float(np.sum(m[:, 0]))  # P(home goals > 0)
 
+    # ── DNB Away ───────────────────────────────────────────────────────────
+    dnb_away_prob = (
+        away_win / (home_win + away_win) if (home_win + away_win) > 0 else 0.5
+    )
+
     return {
         "home_win": round(home_win, 4),
         "draw": round(draw, 4),
         "away_win": round(away_win, 4),
         "dnb_home": round(dnb_home_prob, 4),
+        "dnb_away": round(dnb_away_prob, 4),
         "ah_minus_0_5": round(ah_minus_half, 4),
         "ah_minus_1_0": round(ah_minus_one, 4),
         "ah_minus_1_5": round(ah_minus_one_half, 4),
         "over_1_5": round(over_1_5, 4),
         "over_2_5": round(over_2_5, 4),
         "under_3_5": round(under_3_5, 4),
+        "btts_yes": round(btts_yes, 4),
         "btts_no": round(btts_no, 4),
         "dc_1x": round(dc_1x, 4),
         "dc_x2": round(dc_x2, 4),

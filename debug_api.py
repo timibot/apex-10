@@ -1,4 +1,4 @@
-"""Debug: simulate gates on current fixtures to see rejection reasons."""
+"""Quick debug: view confidence votes and gate results."""
 import logging
 logging.basicConfig(level=logging.INFO)
 
@@ -6,28 +6,40 @@ from apex10.db import get_client
 from apex10.filters.gates import Candidate, run_all_gates
 
 db = get_client()
-r = db.table("upcoming_fixtures").select("*").execute()
+rows = db.table("upcoming_fixtures").select("*").execute().data or []
 
 candidates = []
-for d in r.data:
+for r in rows:
+    votes = round(float(r.get("xgb_prob", 0)) * 5)
     c = Candidate(
-        fixture_id=d.get("id", 0),
-        league=d.get("league", ""),
-        home_team=d.get("home_team", ""),
-        away_team=d.get("away_team", ""),
-        bet_type=d.get("best_bet_type", "Home Win"),
-        odds=d.get("best_bet_odds", 1.5),
-        lgbm_prob=d.get("lgbm_prob", 0),
-        xgb_prob=d.get("xgb_prob", 0),
-        opening_odds=d.get("opening_odds", 1.5),
-        key_player_absent_home=d.get("key_player_absent_home", 0),
-        key_player_absent_away=d.get("key_player_absent_away", 0),
-        features_complete=d.get("features_complete", True),
+        fixture_id=r["api_match_id"],
+        league=r["league"],
+        home_team=r["home_team"],
+        away_team=r["away_team"],
+        bet_type=r.get("best_bet_type", "Home Win"),
+        odds=float(r["best_bet_odds"]),
+        lgbm_prob=float(r["lgbm_prob"]),
+        xgb_prob=float(r["xgb_prob"]),
+        opening_odds=float(r["opening_odds"]),
+        key_player_absent_home=int(r.get("key_player_absent_home", 0)),
+        key_player_absent_away=int(r.get("key_player_absent_away", 0)),
+        features_complete=bool(r.get("features_complete", True)),
+        confidence_votes=votes,
     )
     candidates.append(c)
 
-qualified, rejections = run_all_gates(candidates)
-print(f"\n{len(qualified)} qualified, {len(rejections)} rejected\n")
-print("Rejected fixtures:")
-for rej in rejections[:10]:
-    print(f"  {rej['home_team']:20} vs {rej['away_team']:20} Gate {rej['gate']} ({rej['gate_name']}): {rej['reason']}")
+qualified, rejected = run_all_gates(candidates)
+
+print(f"\n{len(qualified)} qualified, {len(rejected)} rejected")
+print()
+
+if qualified:
+    print("QUALIFIED legs:")
+    for c in qualified:
+        print(f"  {c.home_team:20s} vs {c.away_team:20s} | {c.bet_type:20s} @{c.odds:.2f} | {c.confidence_votes}/5 votes | Tier {c.tier.value}")
+
+print()
+if rejected:
+    print("Rejected fixtures:")
+    for r in rejected:
+        print(f"  {r['home_team']:20s} vs {r['away_team']:20s} Gate {r['gate']} ({r['gate_name']}): {r['reason']}")

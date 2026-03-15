@@ -27,6 +27,7 @@ from apex10.models.features import (
     ONPITCH_FEATURES,
     normalise_team_name,
 )
+from apex10.scoring.confidence import pick_best_bet
 from apex10.scoring.dixon_coles import derive_probabilities
 
 logger = logging.getLogger(__name__)
@@ -647,11 +648,26 @@ def run_inference() -> dict:
 
                     dc_probs = derive_probabilities(mu, nu, league_rho)
 
-                    # Find best-value bet across all markets
+                    # Confidence voting: score all markets, pick best
                     match_odds_data = get_match_odds(live_odds, fixture["home_team"], fixture["away_team"])
-                    best_bet_type, best_odds, best_prob = _find_best_bet(
-                        features, dc_probs, match_odds_data
+                    elo_d = features.get("elo_diff", 0.0)
+                    best = pick_best_bet(
+                        dc_probs, features, match_odds_data,
+                        elo_diff=elo_d, min_votes=3,
                     )
+
+                    if best is not None:
+                        best_bet_type = best.market
+                        best_odds = best.odds
+                        best_prob = best.probability
+                        best_votes = best.votes
+                        sig_str = " ".join(f"{k}={'✓' if v else '✗'}" for k, v in best.signals.items())
+                    else:
+                        best_bet_type = "Home Win"
+                        best_odds = features.get("odds_opening_home", 1.5)
+                        best_prob = probs["consensus_prob"]
+                        best_votes = 0
+                        sig_str = "no qualifying market"
 
                     row = {
                         "api_match_id": fixture["id"],
@@ -659,10 +675,8 @@ def run_inference() -> dict:
                         "match_date": fixture["match_date"],
                         "home_team": fixture["home_team"],
                         "away_team": fixture["away_team"],
-                        # For non-Home-Win markets, both models use the
-                        # Dixon-Coles prob so Gate 2 edge check is correct
-                        "lgbm_prob": best_prob if best_bet_type != "Home Win" else probs["lgbm_prob"],
-                        "xgb_prob": best_prob if best_bet_type != "Home Win" else probs["xgb_prob"],
+                        "lgbm_prob": best_prob,
+                        "xgb_prob": round(best_votes / 5.0, 2),  # encode votes as 0.0-1.0
                         "consensus_prob": best_prob,
                         "best_bet_type": best_bet_type,
                         "best_bet_odds": best_odds,
@@ -674,8 +688,8 @@ def run_inference() -> dict:
                     scored.append(row)
                     logger.info(
                         f"  [{league_name}] {fixture['home_team']} vs {fixture['away_team']}: "
-                        f"Best={best_bet_type} @{best_odds:.2f} (prob={best_prob:.3f}) "
-                        f"LGBM={probs['lgbm_prob']:.3f} XGB={probs['xgb_prob']:.3f}"
+                        f"Best={best_bet_type} @{best_odds:.2f} "
+                        f"({best_votes}/5 votes, prob={best_prob:.3f}) [{sig_str}]"
                     )
 
                 except Exception as e:

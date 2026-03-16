@@ -130,27 +130,51 @@ def _get_market_odds(
         dnb = p_away / (p_home + p_away)
         return round(1.0 / dnb, 3) if dnb > 0 else None
 
-    # 3. Vig-ratio derivation from Over 2.5
+    # 3. Vig-ratio derivation from CLOSEST available market
     #    Bookmaker vig = (bookmaker implied prob) / (model prob)
     #    Applied to target market: target_odds = 1 / (model_target_prob * vig)
+    #
+    #    Over 1.5  ← derive from Over 2.5  (both "over" markets)
+    #    Under 3.5 ← derive from Under 2.5 (both "under" markets, closest line)
+    #    Under 2.5 ← derive from Over 2.5  (complementary market)
     if dc_probs and market_key in ("over_1_5", "under_3_5", "under_2_5"):
-        bookie_o25_odds = match_odds.get("over_2_5")
-        model_o25 = dc_probs.get("over_2_5", 0)
+        # Choose the closest reference market
+        if market_key == "under_3_5":
+            # Under 3.5 is closest to Under 2.5
+            ref_odds = match_odds.get("under_2_5")
+            ref_key = "under_2_5"
+            # If no Under 2.5 available, try deriving from Over 2.5 complement
+            if not ref_odds or ref_odds <= 1.0:
+                ref_o25 = match_odds.get("over_2_5")
+                if ref_o25 and ref_o25 > 1.0:
+                    # under_2_5 implied = 1 - over_2_5 implied
+                    u25_implied = 1.0 - (1.0 / ref_o25)
+                    ref_odds = 1.0 / u25_implied if u25_implied > 0.05 else None
+                    ref_key = "under_2_5"
+        elif market_key == "over_1_5":
+            # Over 1.5 is closest to Over 2.5
+            ref_odds = match_odds.get("over_2_5")
+            ref_key = "over_2_5"
+        else:  # under_2_5
+            # Complementary: derive from Over 2.5
+            ref_odds = match_odds.get("over_2_5")
+            ref_key = "over_2_5"
 
-        if bookie_o25_odds and bookie_o25_odds > 1.0 and model_o25 > 0.05:
-            bookie_implied = 1.0 / bookie_o25_odds
-            vig_ratio = bookie_implied / model_o25  # typically 0.85-0.95
+        model_ref = dc_probs.get(ref_key, 0)
+
+        if ref_odds and ref_odds > 1.0 and model_ref > 0.05:
+            bookie_implied = 1.0 / ref_odds
+            vig_ratio = bookie_implied / model_ref
 
             target_model_prob = dc_probs.get(market_key, 0)
             if target_model_prob > 0.05:
                 adjusted_prob = target_model_prob * vig_ratio
-                # Clamp to avoid impossible odds
                 adjusted_prob = min(max(adjusted_prob, 0.05), 0.98)
                 derived_odds = round(1.0 / adjusted_prob, 2)
                 if derived_odds > 1.0:
                     logger.debug(
                         f"Derived {market_key} odds: {derived_odds:.2f} "
-                        f"(vig={vig_ratio:.3f}, model={target_model_prob:.3f})"
+                        f"(from {ref_key}, vig={vig_ratio:.3f})"
                     )
                     return derived_odds
 

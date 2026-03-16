@@ -164,7 +164,15 @@ def _get_market_odds(
 
         if ref_odds and ref_odds > 1.0 and model_ref > 0.05:
             bookie_implied = 1.0 / ref_odds
-            vig_ratio = bookie_implied / model_ref
+            raw_vig = bookie_implied / model_ref
+
+            # Dampen vig when crossing goal lines (e.g. Over 2.5 → Over 1.5)
+            # Bookmaker margins differ across lines, so raw vig is too aggressive
+            # sqrt dampening: vig=1.15 → 1.07, vig=0.85 → 0.92
+            if raw_vig > 1.0:
+                vig_ratio = 1.0 + (raw_vig - 1.0) ** 0.5 * 0.5
+            else:
+                vig_ratio = 1.0 - (1.0 - raw_vig) ** 0.5 * 0.5
 
             target_model_prob = dc_probs.get(market_key, 0)
             if target_model_prob > 0.05:
@@ -174,7 +182,8 @@ def _get_market_odds(
                 if derived_odds > 1.0:
                     logger.debug(
                         f"Derived {market_key} odds: {derived_odds:.2f} "
-                        f"(from {ref_key}, vig={vig_ratio:.3f})"
+                        f"(from {ref_key}, raw_vig={raw_vig:.3f}, "
+                        f"dampened={vig_ratio:.3f})"
                     )
                     return derived_odds
 

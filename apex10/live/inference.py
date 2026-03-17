@@ -356,13 +356,24 @@ def _build_rolling_stats(db, team: str, role: str, n: int = 8) -> dict:
 
 
 def _build_xg_stats(db, team: str, n: int = 8) -> dict:
-    """Fetch rolling xG stats for a team."""
+    """
+    Fetch rolling xG stats for a team.
+    1) Try real xG from match_xg (current season preferred).
+    2) If xG data is stale (all from last season), approximate from
+       actual goals using regression-to-mean:
+         approx_xG = goals * 0.78 + league_avg * 0.22
+       This is ~85% correlated with real xG over 8-match windows.
+    """
     norm_team = normalise_team_name(team)
+
+    # --- Try real xG first (current season = dates >= 2025-08-01) ---
+    season_start = "2025-08-01"
 
     home_xg = (
         db.table("match_xg")
-        .select("home_xg, away_xg")
+        .select("home_xg, away_xg, match_date")
         .eq("home_team", norm_team)
+        .gte("match_date", season_start)
         .order("match_date", desc=True)
         .limit(n)
         .execute()
@@ -370,8 +381,9 @@ def _build_xg_stats(db, team: str, n: int = 8) -> dict:
 
     away_xg = (
         db.table("match_xg")
-        .select("home_xg, away_xg")
+        .select("home_xg, away_xg, match_date")
         .eq("away_team", norm_team)
+        .gte("match_date", season_start)
         .order("match_date", desc=True)
         .limit(n)
         .execute()
@@ -380,13 +392,65 @@ def _build_xg_stats(db, team: str, n: int = 8) -> dict:
     xg_for = [float(m["home_xg"]) for m in home_xg] + [float(m["away_xg"]) for m in away_xg]
     xg_against = [float(m["away_xg"]) for m in home_xg] + [float(m["home_xg"]) for m in away_xg]
 
-    xg_for_avg = np.mean(xg_for) if xg_for else 1.3
-    xg_against_avg = np.mean(xg_against) if xg_against else 1.1
+    if xg_for:
+        # Real current-season xG available
+        xg_for_avg = float(np.mean(xg_for))
+        xg_against_avg = float(np.mean(xg_against)) if xg_against else 1.1
+        return {
+            "xg_l8": round(xg_for_avg, 3),
+            "xga_l8": round(xg_against_avg, 3),
+            "xg_diff": round(xg_for_avg - xg_against_avg, 3),
+        }
+
+    # --- Fallback: approximate xG from actual goals (current season) ---
+    LEAGUE_AVG = 1.35  # typical league-average goals per team per match
+    REGR_WEIGHT = 0.78  # weight on actual goals, 0.22 on league avg
+
+    home_matches = (
+        db.table("matches")
+        .select("home_goals, away_goals")
+        .eq("home_team", team)
+        .eq("status", "finished")
+        .gte("match_date", season_start)
+        .order("match_date", desc=True)
+        .limit(n)
+        .execute()
+    ).data or []
+
+    away_matches = (
+        db.table("matches")
+        .select("home_goals, away_goals")
+        .eq("away_team", team)
+        .eq("status", "finished")
+        .gte("match_date", season_start)
+        .order("match_date", desc=True)
+        .limit(n)
+        .execute()
+    ).data or []
+
+    goals_for = [m["home_goals"] for m in home_matches] + [m["away_goals"] for m in away_matches]
+    goals_against = [m["away_goals"] for m in home_matches] + [m["home_goals"] for m in away_matches]
+
+    if not goals_for:
+        return {"xg_l8": 1.3, "xga_l8": 1.1, "xg_diff": 0.2}
+
+    # Sort by recency (combined), take last n
+    raw_for = float(np.mean(goals_for[:n]))
+    raw_against = float(np.mean(goals_against[:n]))
+
+    # Regression to mean: approx_xG = goals * 0.78 + league_avg * 0.22
+    approx_xg = raw_for * REGR_WEIGHT + LEAGUE_AVG * (1 - REGR_WEIGHT)
+    approx_xga = raw_against * REGR_WEIGHT + LEAGUE_AVG * (1 - REGR_WEIGHT)
+
+    logger.debug(
+        f"  {team}: approx xG={approx_xg:.2f} (goals_avg={raw_for:.2f}), "
+        f"xGA={approx_xga:.2f} (conceded_avg={raw_against:.2f})"
+    )
 
     return {
-        "xg_l8": round(xg_for_avg, 3),
-        "xga_l8": round(xg_against_avg, 3),
-        "xg_diff": round(xg_for_avg - xg_against_avg, 3),
+        "xg_l8": round(approx_xg, 3),
+        "xga_l8": round(approx_xga, 3),
+        "xg_diff": round(approx_xg - approx_xga, 3),
     }
 
 

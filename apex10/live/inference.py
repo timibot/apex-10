@@ -230,7 +230,10 @@ def _fetch_league_fixtures(
     # 1. Look at all events that haven't kicked off and find the lowest intRound
     unplayed_events = []
     for event in events:
-        date_str = event.get("dateEvent", "")
+        date_str = event.get("dateEvent")
+        if not date_str:  # Skip postponed/unscheduled matches with no date
+            continue
+            
         time_str = event.get("strTime", "")
         if not _has_kicked_off(date_str, time_str):
             unplayed_events.append(event)

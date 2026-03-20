@@ -56,13 +56,20 @@ def ticket_generated(
     combined_odds: float,
     stake: float,
     win_rate: float,
+    breakdown: str = "",
 ) -> bool:
+    body = (
+        f"Week: {week}\n"
+        f"Legs: {legs} | Combined odds: {combined_odds:.2f}x\n"
+        f"Stake: ₦{stake:,.2f} | Simulated win rate: {win_rate:.1%}"
+    )
+    if breakdown:
+        body += f"\n\n**Ticket Breakdown:**\n{breakdown}"
+        
     return _send(_fmt(
         AlertLevel.SUCCESS,
         "Ticket Generated",
-        f"Week: {week}\n"
-        f"Legs: {legs} | Combined odds: {combined_odds:.2f}x\n"
-        f"Stake: ₦{stake:,.2f} | Simulated win rate: {win_rate:.1%}",
+        body,
     ))
 
 

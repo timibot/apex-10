@@ -1052,12 +1052,22 @@ def run_inference() -> dict:
     if scored:
         # Build a readable ticket summary for the Discord message
         combined_odds = 1.0
+        combined_prob = 1.0
         lines = []
         for row in scored:
             combined_odds *= row["best_bet_odds"]
+            
+            # Use consensus_prob if available, fallback to something else if missing
+            prob = row.get("consensus_prob") or row.get("lgbm_prob") or 0.0
+            combined_prob *= max(prob, 1e-5)
+            
+            implied = 1 / row["best_bet_odds"] if row["best_bet_odds"] > 0 else 1.0
+            edge = prob - implied
+            
             lines.append(
                 f"• {row['home_team']} vs {row['away_team']} — "
-                f"{row['best_bet_type']} @{row['best_bet_odds']:.2f}"
+                f"**{row['best_bet_type']} @{row['best_bet_odds']:.2f}** "
+                f"(Prob: {prob:.1%} / Edge: {edge:+.1%})"
             )
         ticket_body = "\n".join(lines)
         week_label = scored[0]["match_date"][:10] if scored else "unknown"
@@ -1067,13 +1077,8 @@ def run_inference() -> dict:
             legs=len(scored),
             combined_odds=round(combined_odds, 2),
             stake=0.0,  # paper trading — no real stake
-            win_rate=0.0,
-        )
-        # Also send the detailed leg breakdown
-        notify._send(
-            f"📋 **Ticket Legs:**\n{ticket_body}\n\n"
-            f"Combined odds: **{combined_odds:.2f}x** across "
-            f"{len(leagues_loaded)} leagues"
+            win_rate=combined_prob,
+            breakdown=ticket_body,
         )
     else:
         notify.no_ticket_week(

@@ -1099,8 +1099,8 @@ def run_inference() -> dict:
                 edge = leg.consensus_prob - (1 / leg.odds if leg.odds > 0 else 1.0)
                 lines.append(
                     f"• {leg.home_team} vs {leg.away_team} — "
-                    f"**{leg.bet_type} @{leg.odds:.2f}** "
-                    f"(Prob: {leg.consensus_prob:.1%} / Edge: {edge:+.1%})"
+                    f"**{leg.bet_type} @{leg.odds:.2f}** [{leg.confidence_votes}/5 Votes] "
+                    f"(Prob: {leg.consensus_prob:.1%} | Edge: {edge:+.1%})"
                 )
             ticket_body = "\n".join(lines)
 

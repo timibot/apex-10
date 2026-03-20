@@ -127,25 +127,10 @@ def build_ticket(qualified: list[Candidate]) -> Ticket:
         selected_legs.append(leg)
         running_product = round(running_product * c.odds, 4)
 
-        if running_product >= ODDS.TARGET_PRODUCT:
-            break  # Stop — target met, no unnecessary legs
-
     if running_product < ODDS.TARGET_PRODUCT:
-        logger.warning(
-            f"Could not reach {ODDS.TARGET_PRODUCT}x target. "
-            f"Best product: {running_product:.2f}x from {len(selected_legs)} legs"
-        )
-        return Ticket(
-            legs=selected_legs,
-            combined_odds=running_product,
-            simulated_win_rate=0.0,
-            ci_low=0.0,
-            ci_high=0.0,
-            no_ticket=True,
-            reason=(
-                f"Insufficient odds product: "
-                f"{running_product:.2f} < {ODDS.TARGET_PRODUCT}"
-            ),
+        logger.info(
+            f"Note: Generated ticket product ({running_product:.2f}x) "
+            f"is below target ({ODDS.TARGET_PRODUCT}x). Proceeding dynamically."
         )
 
     win_rate, ci_low, ci_high = monte_carlo_win_probability(selected_legs)

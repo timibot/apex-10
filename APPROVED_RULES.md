@@ -3,11 +3,11 @@
 
 ## 1. Ticket Generation & Size
 * **Dynamic Legs:** The "9 legs" target is strictly **NOT FIXED**. The optimizer must build a ticket of whatever size naturally survives the gates. It should never artificially block or drop an entire ticket simply because it didn't hit a magical 10.0x combined odds threshold.
-* **Selection Logic / Tiebreakers:** Sort all qualifying matches by:
-  1. **Confidence Level** (5/5 vs 4/5 - descending)
-  2. **Model Probability** (descending)
+* **Selection Logic / Tiebreakers:** Sort all qualifying matches (must be 4/5 or 5/5 confidence) by:
+  1. **Model Probability** (mathematical safety - descending)
+  2. **Confidence Level** (5/5 vs 4/5 - descending)
   3. **Highest Odds** (descending)  
-  *(Rule: If two games have the same 5/5 confidence and same probability, pick the one with the highest odds).*
+  *(Rule: The system builds strictly from safest mathematically likely bets downwards. If two games have the exact same prediction probability, the 5/5 confidence wins. If both are the same, highest odds wins).*
 
 ## 2. Gate Filters (The Non-Negotiable Rules)
 * **Odds Range:** Matches MUST have odds strictly between **1.20 and 1.49**. Any match predicting odds below 1.20 (like 1.13) or above 1.49 must be relentlessly dropped.

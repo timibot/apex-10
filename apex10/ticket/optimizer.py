@@ -75,20 +75,20 @@ class Ticket:
 def _sort_candidates(candidates: list[Candidate]) -> list[Candidate]:
     """
     Sort by:
-      1. Tier rank ASC (S=0 first)
-      2. Model Probability DESC
+      1. Model Probability DESC
+      2. Tier rank ASC (S=0 first)
       3. Odds DESC
     """
     return sorted(
         candidates,
-        key=lambda c: (TIER_RANK.get(c.tier, 3), -c.consensus_prob, -c.odds),
+        key=lambda c: (-c.consensus_prob, TIER_RANK.get(c.tier, 3), -c.odds),
     )
 
 
 def build_ticket(qualified: list[Candidate]) -> Ticket:
     """
     Greedy accumulation:
-      1. Sort candidates by confidence DESC, odds DESC within tier
+      1. Sort candidates by probability DESC, confidence DESC, odds DESC
       2. Multiply odds until product >= 10.0
       3. Stop immediately — no extra legs
 

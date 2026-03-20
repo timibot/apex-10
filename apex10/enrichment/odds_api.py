@@ -112,7 +112,7 @@ def fetch_live_odds(leagues: list[str] | None = None) -> dict[str, dict]:
         params = {
             "apiKey": cfg.ODDS_API_KEY,
             "regions": "uk",
-            "markets": "h2h,totals,btts",
+            "markets": "h2h,totals",
             "oddsFormat": "decimal",
         }
 

@@ -1017,6 +1017,7 @@ def run_inference() -> dict:
                         "key_player_absent_home": is_key_player_absent(fixture["home_team"]),
                         "key_player_absent_away": is_key_player_absent(fixture["away_team"]),
                         "features_complete": True,
+                        "confidence_votes": best_votes,
                     }
                     scored.append(row)
                     logger.info(
@@ -1048,38 +1049,65 @@ def run_inference() -> dict:
     }
     logger.info(f"═══ Inference complete ═══ {summary}")
 
-    # ── Discord notification ──────────────────────────────────────────
+    # ── Ticket Generation & Discord notification ──────────────────────
     if scored:
-        # Build a readable ticket summary for the Discord message
-        combined_odds = 1.0
-        combined_prob = 1.0
-        lines = []
-        for row in scored:
-            combined_odds *= row["best_bet_odds"]
-            
-            # Use consensus_prob if available, fallback to something else if missing
-            prob = row.get("consensus_prob") or row.get("lgbm_prob") or 0.0
-            combined_prob *= max(prob, 1e-5)
-            
-            implied = 1 / row["best_bet_odds"] if row["best_bet_odds"] > 0 else 1.0
-            edge = prob - implied
-            
-            lines.append(
-                f"• {row['home_team']} vs {row['away_team']} — "
-                f"**{row['best_bet_type']} @{row['best_bet_odds']:.2f}** "
-                f"(Prob: {prob:.1%} / Edge: {edge:+.1%})"
-            )
-        ticket_body = "\n".join(lines)
-        week_label = scored[0]["match_date"][:10] if scored else "unknown"
+        from apex10.filters.gates import Candidate, run_all_gates
+        from apex10.ticket.optimizer import build_ticket
 
-        notify.ticket_generated(
-            week=week_label,
-            legs=len(scored),
-            combined_odds=round(combined_odds, 2),
-            stake=0.0,  # paper trading — no real stake
-            win_rate=combined_prob,
-            breakdown=ticket_body,
-        )
+        candidates = []
+        for row in scored:
+            # We skip matches where our AI didn't find any qualifying bet
+            if row.get("confidence_votes", 0) == 0 and row["best_bet_type"] == "Home Win":
+                continue
+
+            candidates.append(
+                Candidate(
+                    fixture_id=row["api_match_id"],
+                    league=row["league"],
+                    home_team=row["home_team"],
+                    away_team=row["away_team"],
+                    bet_type=row["best_bet_type"],
+                    odds=row["best_bet_odds"],
+                    lgbm_prob=row["lgbm_prob"],
+                    xgb_prob=row["xgb_prob"],
+                    opening_odds=row["opening_odds"],
+                    key_player_absent_home=row["key_player_absent_home"],
+                    key_player_absent_away=row["key_player_absent_away"],
+                    features_complete=row["features_complete"],
+                    consensus_prob=row["consensus_prob"],
+                    confidence_votes=row.get("confidence_votes", 0),
+                )
+            )
+
+        qualified, rejections = run_all_gates(candidates)
+        ticket = build_ticket(qualified)
+
+        if ticket.no_ticket:
+            notify.no_ticket_week(
+                week=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                reason=ticket.reason,
+            )
+        else:
+            week_label = scored[0]["match_date"][:10] if scored else "unknown"
+            
+            lines = []
+            for leg in ticket.legs:
+                edge = leg.consensus_prob - (1 / leg.odds if leg.odds > 0 else 1.0)
+                lines.append(
+                    f"• {leg.home_team} vs {leg.away_team} — "
+                    f"**{leg.bet_type} @{leg.odds:.2f}** "
+                    f"(Prob: {leg.consensus_prob:.1%} / Edge: {edge:+.1%})"
+                )
+            ticket_body = "\n".join(lines)
+
+            notify.ticket_generated(
+                week=week_label,
+                legs=len(ticket.legs),
+                combined_odds=ticket.combined_odds,
+                stake=0.0,
+                win_rate=ticket.simulated_win_rate,
+                breakdown=ticket_body,
+            )
     else:
         notify.no_ticket_week(
             week=datetime.now(timezone.utc).strftime("%Y-%m-%d"),

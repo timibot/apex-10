@@ -1030,12 +1030,16 @@ def run_inference() -> dict:
                     logger.error(f"Failed to score {fixture.get('home_team','?')} vs {fixture.get('away_team','?')}: {e}")
                     cache_log.add_source_failure("inference", str(e))
 
-        # Upsert to upcoming_fixtures
+        # Upsert to upcoming_fixtures (Schema strictness requires stripping internal python vars)
         if scored:
+            db_scored = [
+                {k: v for k, v in row.items() if k != "confidence_votes"}
+                for row in scored
+            ]
             db.table("upcoming_fixtures").upsert(
-                scored, on_conflict="api_match_id"
+                db_scored, on_conflict="api_match_id"
             ).execute()
-            logger.info(f"Wrote {len(scored)} scored fixtures to upcoming_fixtures")
+            logger.info(f"Wrote {len(db_scored)} scored fixtures to upcoming_fixtures")
 
         if leagues_skipped:
             logger.warning(f"Leagues skipped (no models): {leagues_skipped}")

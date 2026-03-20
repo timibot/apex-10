@@ -25,7 +25,7 @@ class OddsConfig:
     MIN_EDGE: float = 0.04          # 4% minimum edge, both models
     MAX_DIVERGENCE: float = 0.10    # >10% model disagreement → drop
     MAX_DRIFT: float = 0.08         # Line movement threshold → drop
-    MAX_LEGS_PER_LEAGUE: int = 3
+    MAX_LEGS_PER_LEAGUE: int = 999  # Cap removed per user instruction to allow unlimited qualifying tickets
 
 
 @dataclass(frozen=True)

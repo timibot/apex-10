@@ -204,71 +204,66 @@ def _fetch_league_fixtures(
     season: str,
 ) -> list[dict]:
     """
-    Fetch upcoming fixtures for one league.
-    Scans rounds to find the next round with unplayed matches.
+    Fetch upcoming fixtures for one league using a single season call.
+    Filters to find the next active round with unplayed matches to avoid TheSportsDB 429 limits.
     """
-    today = date.today()
-    fixtures = []
+    url = f"https://www.thesportsdb.com/api/v1/json/3/eventsseason.php?id={league_id}&s={season}"
+    
+    import time as _time
+    _time.sleep(2.0)  # Rate limit: TheSportsDB free tier
 
-    # Start scanning from a high round (by March, most leagues are ~round 25-30)
-    start_round = max(1, 20 if today.month >= 11 or today.month <= 7 else 1)
-    for round_num in range(start_round, 39):
-        url = "https://www.thesportsdb.com/api/v1/json/3/eventsround.php"
-        params = {"id": league_id, "r": round_num, "s": season}
-
-        import time as _time
-        _time.sleep(1.5)  # Rate limit: TheSportsDB free tier
-
-        # Retry on 429 with backoff
-        for attempt in range(3):
-            response = client.get(url, params=params)
-            if response.status_code == 429:
-                wait = 5 * (attempt + 1)
-                logger.warning(f"Rate limited, waiting {wait}s (attempt {attempt+1}/3)")
-                _time.sleep(wait)
-                continue
-            response.raise_for_status()
-            break
-        else:
-            logger.warning(f"Giving up on {league_name} R{round_num} after 3 rate limit retries")
-            break
-
-        events = response.json().get("events") or []
-        if not events:
+    for attempt in range(3):
+        response = client.get(url)
+        if response.status_code == 429:
+            wait = 5 * (attempt + 1)
+            logger.warning(f"Rate limited, waiting {wait}s (attempt {attempt+1}/3)")
+            _time.sleep(wait)
             continue
+        response.raise_for_status()
+        break
+    else:
+        logger.warning(f"Giving up on {league_name} season fetch after 3 rate limit retries")
+        return []
 
-        # Check if this round has any upcoming matches
-        has_upcoming = any(
-            not _has_kicked_off(e.get("dateEvent", ""), e.get("strTime", ""))
-            for e in events
-        )
+    events = response.json().get("events") or []
+    
+    # 1. Look at all events that haven't kicked off and find the lowest intRound
+    unplayed_events = []
+    for event in events:
+        date_str = event.get("dateEvent", "")
+        time_str = event.get("strTime", "")
+        if not _has_kicked_off(date_str, time_str):
+            unplayed_events.append(event)
+            
+    if not unplayed_events:
+        return []
+        
+    # Determine the active round (lowest round number among unplayed)
+    try:
+        active_round = min(int(e.get("intRound") or 999) for e in unplayed_events)
+    except Exception:
+        active_round = None
 
-        if has_upcoming:
-            for event in events:
-                event_date_str = event.get("dateEvent", "")
-                event_time_str = event.get("strTime", "")
+    fixtures = []
+    for event in unplayed_events:
+        round_num = int(event.get("intRound") or 999)
+        if active_round is not None and round_num != active_round:
+            continue
+            
+        home = _normalise_sportsdb_team(event.get("strHomeTeam", ""))
+        away = _normalise_sportsdb_team(event.get("strAwayTeam", ""))
+        
+        fixtures.append({
+            "id": int(event.get("idEvent", 0)),
+            "league": league_name,
+            "match_date": event.get("dateEvent", ""),
+            "home_team": home,
+            "away_team": away,
+            "round": round_num,
+            "time": event.get("strTime", ""),
+        })
 
-                # Skip matches that have already kicked off
-                if _has_kicked_off(event_date_str, event_time_str):
-                    continue
-
-                home = _normalise_sportsdb_team(event.get("strHomeTeam", ""))
-                away = _normalise_sportsdb_team(event.get("strAwayTeam", ""))
-
-                fixture = {
-                    "id": int(event.get("idEvent", 0)),
-                    "league": league_name,
-                    "match_date": event_date_str,
-                    "home_team": home,
-                    "away_team": away,
-                    "round": round_num,
-                    "time": event_time_str,
-                }
-                fixtures.append(fixture)
-
-            logger.info(f"  {league_name} R{round_num}: {len(fixtures)} upcoming")
-            break  # Found the active round
-
+    logger.info(f"  {league_name} R{active_round}: {len(fixtures)} upcoming")
     return fixtures
 
 

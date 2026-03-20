@@ -54,8 +54,8 @@ class StakingConfig:
 
 @dataclass(frozen=True)
 class LeagueConfig:
-    # Phase 1: EPL only. Phase 2+: expand.
-    ACTIVE_LEAGUES: tuple = ("EPL",)
+    # Live Deployment: All 5 major European leagues unlocked.
+    ACTIVE_LEAGUES: tuple = ("EPL", "La Liga", "Bundesliga", "Serie A", "Ligue 1")
     ALL_LEAGUES: tuple = ("EPL", "La Liga", "Bundesliga", "Serie A", "Ligue 1")
     LEAGUE_IDS: dict = field(default_factory=lambda: {
         "EPL": 39,

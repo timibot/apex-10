@@ -31,5 +31,6 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
           APEX_ENV: production
         run: python -m apex10.live.settlement

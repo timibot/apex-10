@@ -135,6 +135,15 @@ def retrain_complete(
     ))
 
 
+def api_exhausted(api_name: str) -> bool:
+    return _send(_fmt(
+        AlertLevel.WARNING,
+        "API Key Exhausted / Invalid",
+        f"The configured {api_name} API returned a 401 or 429 error.\n"
+        f"Please check your usage limits and update the key in GitHub Secrets.",
+    ))
+
+
 def paper_trading_complete(ticket_count: int, roi: float) -> bool:
     return _send(_fmt(
         AlertLevel.SUCCESS,

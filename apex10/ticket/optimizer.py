@@ -74,12 +74,14 @@ class Ticket:
 
 def _sort_candidates(candidates: list[Candidate]) -> list[Candidate]:
     """
-    Sort by tier rank ASC (S=0 first), then odds DESC within same tier.
-    S-tier legs always come before A, A before B.
+    Sort by:
+      1. Tier rank ASC (S=0 first)
+      2. Model Probability DESC
+      3. Odds DESC
     """
     return sorted(
         candidates,
-        key=lambda c: (TIER_RANK.get(c.tier, 3), -c.odds),
+        key=lambda c: (TIER_RANK.get(c.tier, 3), -c.consensus_prob, -c.odds),
     )
 
 

@@ -165,14 +165,16 @@ def run_training(league: str = "EPL", n_trials: int = MODEL.OPTUNA_TRIALS) -> di
         ("lgbm", lgbm_params, lgbm_gate["brier_score"]),
         ("xgboost", xgb_params, xgb_gate["brier_score"]),
     ]:
-        db.table("model_params").insert({
-            "model_name": model_name,
-            "league": league,
-            "version": next_version,
-            "params": params,
-            "brier_score": brier,
-            "is_active": True,
-        }).execute()
+        try:
+            db.table("model_params").insert({
+                "model_name": model_name,
+                "version": next_version,
+                "params": params,
+                "brier_score": brier,
+                "is_active": True,
+            }).execute()
+        except Exception as e:
+            logger.warning(f"Failed to log model params telemetry to Supabase: {e}")
 
     # Deactivate previous versions
     db.table("model_params").update({"is_active": False}).lt(

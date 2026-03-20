@@ -50,5 +50,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "--cov=apex10 --cov-report=term-missing --cov-fail-under=80"
 
-[tool.setuptools]
-packages = ["apex10"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["apex10*"]
+exclude = ["models*"]

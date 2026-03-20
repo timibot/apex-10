@@ -16,23 +16,19 @@ from apex10.db import get_client
 
 logger = logging.getLogger(__name__)
 
-# ── Feature split (orthogonal subspacing) ──────────────────────────────────
 ONPITCH_FEATURES = [
     "xg_home_l8", "xga_home_l8", "xg_away_l8", "xga_away_l8",
-    "xg_diff_home", "xg_diff_away",
     "ppda_home", "ppda_away", "ppda_delta",
     "form_pts_home_l5", "form_pts_away_l5",
-    "form_gd_home_l5", "form_gd_away_l5",
-    "home_advantage", "h2h_win_rate_home",
     "injury_count_home", "injury_count_away",
     "key_player_absent_home", "key_player_absent_away",
+    "home_advantage", "h2h_win_rate_home",
     "clean_sheet_rate_home", "clean_sheet_rate_away",
-    "goals_scored_avg_home", "goals_conceded_avg_away",
     "weather_rain_mm", "weather_wind_kmh",
-    "rivalry_index",
-    "playstyle_counter_attack", "opponent_low_block",
-    "travel_hours_away",
-]  # 29 features
+    "rivalry_index", "playstyle_counter_attack",
+    "opponent_low_block", "travel_hours_away",
+    "elo_diff"  # <-- THE SURGICAL ADDITION: The Shared Anchor
+]
 
 MARKET_FEATURES = [
     "odds_opening_home", "odds_current_home", "odds_movement",

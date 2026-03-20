@@ -1,0 +1,41 @@
+{
+    "model": "LightGBM",
+    "status": "FAILED",
+    "top_10_features": {
+        "xg_home_l8": 29.8149,
+        "xga_home_l8": 29.6767,
+        "xg_away_l8": 11.7159,
+        "form_pts_home_l5": 10.6107,
+        "form_pts_away_l5": 9.2291,
+        "xga_away_l8": 8.9527,
+        "ppda_home": 0.0,
+        "ppda_away": 0.0,
+        "ppda_delta": 0.0,
+        "home_advantage": 0.0
+    },
+    "all_features": {
+        "xg_home_l8": 29.8149,
+        "xga_home_l8": 29.6767,
+        "xg_away_l8": 11.7159,
+        "form_pts_home_l5": 10.6107,
+        "form_pts_away_l5": 9.2291,
+        "xga_away_l8": 8.9527,
+        "ppda_home": 0.0,
+        "ppda_away": 0.0,
+        "ppda_delta": 0.0,
+        "home_advantage": 0.0,
+        "h2h_win_rate_home": 0.0,
+        "injury_count_home": 0.0,
+        "injury_count_away": 0.0,
+        "key_player_absent_home": 0.0,
+        "key_player_absent_away": 0.0,
+        "clean_sheet_rate_home": 0.0,
+        "clean_sheet_rate_away": 0.0,
+        "weather_rain_mm": 0.0,
+        "weather_wind_kmh": 0.0,
+        "rivalry_index": 0.0,
+        "playstyle_counter_attack": 0.0,
+        "opponent_low_block": 0.0,
+        "travel_hours_away": 0.0
+    }
+}

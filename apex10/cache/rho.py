@@ -107,6 +107,9 @@ def compute_and_store_rho(league_name: str, db_client) -> float:
     Returns computed rho.
     """
     # Fetch joined match data (xG + actual goals)
+    # Note: match_xg may not have a league column, so we fetch all and
+    # rely on the fact that compute_and_store_rho is called per-league.
+    # If match_xg gains a league column, add .eq("league", league_name)
     result = (
         db_client.table("match_xg")
         .select("home_xg,away_xg,home_goals,away_goals")

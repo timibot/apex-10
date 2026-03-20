@@ -8,4 +8,15 @@ dist/
 *.egg-info/
 .venv/
 models/*.pkl
-models/*.joblib
+
+# Temporary and test files
+*.zip
+check_*.py
+debug_*.py
+test_*.py
+fetch_*.py
+inject_*.py
+inspect_*.py
+cross_*.py
+understat_*.html
+understat_*.json

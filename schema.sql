@@ -163,6 +163,10 @@ CREATE TABLE IF NOT EXISTS upcoming_fixtures (
   xgb_prob FLOAT,
   key_player_absent_home INTEGER DEFAULT 0,
   key_player_absent_away INTEGER DEFAULT 0,
+  odds_ah_home FLOAT,
+  odds_ah_away FLOAT,
+  odds_dnb_home FLOAT,
+  odds_dnb_away FLOAT,
   features_complete BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()

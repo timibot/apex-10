@@ -112,7 +112,7 @@ def fetch_live_odds(leagues: list[str] | None = None) -> dict[str, dict]:
         params = {
             "apiKey": cfg.ODDS_API_KEY,
             "regions": "uk",
-            "markets": "h2h,totals",
+            "markets": "h2h,totals,btts",
             "oddsFormat": "decimal",
         }
 
@@ -142,6 +142,9 @@ def fetch_live_odds(leagues: list[str] | None = None) -> dict[str, dict]:
                 best_over_2_5 = 1.0
                 best_under_2_5 = 1.0
                 best_under_3_5 = 1.0
+                # BTTS
+                best_btts_yes = 1.0
+                best_btts_no = 1.0
 
                 for bookmaker in event.get("bookmakers", []):
                     for market in bookmaker.get("markets", []):
@@ -171,6 +174,12 @@ def fetch_live_odds(leagues: list[str] | None = None) -> dict[str, dict]:
                             elif point == 3.5:
                                 if under_price > best_under_3_5:
                                     best_under_3_5 = under_price
+                                    
+                        elif mkey == "btts":
+                            if yes_price := outcomes.get("Yes"):
+                                best_btts_yes = max(best_btts_yes, yes_price)
+                            if no_price := outcomes.get("No"):
+                                best_btts_no = max(best_btts_no, no_price)
 
                 if best_home > 1.0:  # Only store if we actually got odds
                     all_odds[match_key] = {
@@ -181,6 +190,8 @@ def fetch_live_odds(leagues: list[str] | None = None) -> dict[str, dict]:
                         "over_2_5": best_over_2_5 if best_over_2_5 > 1.0 else None,
                         "under_2_5": best_under_2_5 if best_under_2_5 > 1.0 else None,
                         "under_3_5": best_under_3_5 if best_under_3_5 > 1.0 else None,
+                        "btts_yes": best_btts_yes if best_btts_yes > 1.0 else None,
+                        "btts_no": best_btts_no if best_btts_no > 1.0 else None,
                     }
 
         except httpx.HTTPStatusError as e:

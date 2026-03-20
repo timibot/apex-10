@@ -81,7 +81,7 @@ def assert_ppda_not_all_stubs(
 ) -> None:
     """
     Assert PPDA records contain real data — not all defaulting to stub.
-    If every record has ppda == stub_value, FBref fetch silently failed.
+    If every record has ppda == stub_value, Understat fetch silently failed.
     """
     if not records:
         return
@@ -91,7 +91,7 @@ def assert_ppda_not_all_stubs(
     if all_stub:
         raise ValidationError(
             f"PPDA_ALL_STUBS: All {len(records)} PPDA records equal "
-            f"stub value {stub_value} — FBref fetch may have failed."
+            f"stub value {stub_value} — Understat fetch may have failed."
         )
     logger.info(f"✅ PPDA real data confirmed: {len(records)} records")
 

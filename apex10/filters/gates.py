@@ -224,7 +224,15 @@ def run_all_gates(
         gate_5_line_movement,
     ]
 
-    for c in candidates:
+    # Pre-sort candidates to ensure highest confidence and odds get league slots first
+    # Sort order: 1. confidence_votes (DESC), 2. odds (DESC), 3. fixture_id (ASC)
+    sorted_candidates = sorted(
+        candidates, 
+        key=lambda c: (c.confidence_votes, c.odds, -c.fixture_id), 
+        reverse=True
+    )
+
+    for c in sorted_candidates:
         rejected = False
 
         for gate_fn in gates:
@@ -244,62 +252,19 @@ def run_all_gates(
         if rejected:
             continue
 
-        # Gate 6: stateful — league cap with swap logic
+        # Gate 6: stateful — league cap
+        # No swap logic needed because we pre-sorted the candidates.
         g6 = gate_6_correlation(c, league_counts)
         if not g6.passed:
-            # Swap logic: if this candidate has MORE votes than the
-            # weakest qualified leg from the same league, sub it in.
-            same_league = [
-                (i, q) for i, q in enumerate(qualified)
-                if q.league == c.league
-            ]
-            if same_league:
-                # Find the weakest (lowest votes, then lowest odds)
-                weakest_idx, weakest = min(
-                    same_league,
-                    key=lambda x: (x[1].confidence_votes, x[1].odds),
-                )
-                if c.confidence_votes > weakest.confidence_votes:
-                    # Swap: remove weakest, add this candidate
-                    logger.info(
-                        f"Gate 6 swap: {c.home_team} vs {c.away_team} "
-                        f"({c.confidence_votes}/5) replaces "
-                        f"{weakest.home_team} vs {weakest.away_team} "
-                        f"({weakest.confidence_votes}/5) in {c.league}"
-                    )
-                    rejection_log.append({
-                        "fixture_id": weakest.fixture_id,
-                        "home_team": weakest.home_team,
-                        "away_team": weakest.away_team,
-                        "gate": 6,
-                        "gate_name": "correlation_swap",
-                        "reason": (
-                            f"Swapped out for {c.home_team} vs {c.away_team} "
-                            f"({c.confidence_votes}/5 > {weakest.confidence_votes}/5)"
-                        ),
-                    })
-                    qualified.pop(weakest_idx)
-                    # Don't change league_counts — still 3 legs
-                else:
-                    rejection_log.append({
-                        "fixture_id": c.fixture_id,
-                        "home_team": c.home_team,
-                        "away_team": c.away_team,
-                        "gate": 6,
-                        "gate_name": "correlation",
-                        "reason": g6.reason,
-                    })
-                    continue
-            else:
-                rejection_log.append({
-                    "fixture_id": c.fixture_id,
-                    "home_team": c.home_team,
-                    "away_team": c.away_team,
-                    "gate": 6,
-                    "gate_name": "correlation",
-                    "reason": g6.reason,
-                })
-                continue
+            rejection_log.append({
+                "fixture_id": c.fixture_id,
+                "home_team": c.home_team,
+                "away_team": c.away_team,
+                "gate": 6,
+                "gate_name": "correlation",
+                "reason": g6.reason,
+            })
+            continue
 
         # Passed all gates
         league_counts[c.league] = league_counts.get(c.league, 0) + 1
@@ -320,6 +285,49 @@ def run_all_gates(
             continue
 
         qualified.append(c)
+
+    # --- Post-loop Swap Logic ---
+    # User requested: replace <5/5 accepted games with 5/5 rejected games from Gate 6
+    gate_6_rejects_5_5 = [
+        c for c in sorted_candidates 
+        if c.confidence_votes == 5 and c not in qualified
+        and any(r["fixture_id"] == c.fixture_id and r["gate"] == 6 for r in rejection_log)
+    ]
+    
+    if gate_6_rejects_5_5:
+        # Find weakest accepted games (< 5 votes), weakest are at the end of the list
+        weak_accepted = [c for c in qualified if c.confidence_votes < 5]
+        
+        while gate_6_rejects_5_5 and weak_accepted:
+            new_leg = gate_6_rejects_5_5.pop(0)  # Strongest 5/5 reject (best odds)
+            weak_leg = weak_accepted.pop(-1)     # Weakest accepted (lowest votes, lowest odds)
+            
+            logger.info(
+                f"Gate 6 Override: Swapping IN 5/5 {new_leg.home_team} vs {new_leg.away_team} "
+                f"for {weak_leg.confidence_votes}/5 {weak_leg.home_team} vs {weak_leg.away_team}"
+            )
+            
+            qualified.remove(weak_leg)
+            
+            # Record why the weak leg was dropped
+            rejection_log.append({
+                "fixture_id": weak_leg.fixture_id,
+                "home_team": weak_leg.home_team,
+                "away_team": weak_leg.away_team,
+                "gate": 6,
+                "gate_name": "correlation_override",
+                "reason": f"Swapped out to rescue 5/5 game {new_leg.home_team}",
+            })
+            
+            # Remove the new_leg from the rejection log so it doesn't show as rejected
+            for r in list(rejection_log):
+                if r["fixture_id"] == new_leg.fixture_id and r["gate"] == 6:
+                    rejection_log.remove(r)
+                    break
+                    
+            # Set tier properly and add to qualified
+            new_leg.tier = ConfidenceTier.S
+            qualified.append(new_leg)
 
     logger.info(
         f"Gate results: {len(qualified)} qualified, "

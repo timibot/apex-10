@@ -39,6 +39,7 @@ class TicketLeg:
     xgb_prob: float
     lgbm_edge: float
     xgb_edge: float
+    confidence_votes: int = 0
     tier: str = "A"
 
 
@@ -65,8 +66,8 @@ class Ticket:
         for i, leg in enumerate(self.legs, 1):
             lines.append(
                 f"{i}. [{leg.tier}] {leg.home_team} vs {leg.away_team} "
-                f"[{leg.bet_type}] @ {leg.odds} "
-                f"(conf: {leg.consensus_prob:.1%})"
+                f"[{leg.bet_type}] @ {leg.odds:.2f} "
+                f"(conf: {leg.confidence_votes / 5.0 * 100:.0f}%)"
             )
         return "\n".join(lines)
 
@@ -120,6 +121,7 @@ def build_ticket(qualified: list[Candidate]) -> Ticket:
             xgb_prob=c.xgb_prob,
             lgbm_edge=c.lgbm_edge,
             xgb_edge=c.xgb_edge,
+            confidence_votes=c.confidence_votes,
             tier=c.tier.value if isinstance(c.tier, ConfidenceTier) else str(c.tier),
         )
         selected_legs.append(leg)

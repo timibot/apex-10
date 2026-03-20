@@ -1,30 +1,31 @@
 """
-Isotonic regression calibration.
+Platt scaling calibration (Logistic Regression sigmoid).
 Applied after training — corrects systematic probability over/under-confidence.
 Calibrator is fit on validation set, applied to test set and live predictions.
 """
 from __future__ import annotations
 
 import logging
-
 import numpy as np
-from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss
 
 logger = logging.getLogger(__name__)
 
-
-def fit_calibrator(y_true: np.ndarray, y_prob: np.ndarray) -> IsotonicRegression:
-    """Fit isotonic regression on validation set probabilities."""
-    calibrator = IsotonicRegression(out_of_bounds="clip")
-    calibrator.fit(y_prob, y_true)
-    logger.info("Calibrator fitted")
+def fit_calibrator(y_true: np.ndarray, y_prob: np.ndarray) -> LogisticRegression:
+    """
+    Fit Platt scaling (Logistic Regression) on validation set probabilities.
+    Forces a parametric sigmoid curve, acting as a regularizer.
+    """
+    calibrator = LogisticRegression(C=999999, solver="lbfgs")
+    calibrator.fit(y_prob.reshape(-1, 1), y_true)
+    logger.info("Platt calibrator (LogisticRegression) fitted")
     return calibrator
 
 
-def calibrate(calibrator: IsotonicRegression, y_prob: np.ndarray) -> np.ndarray:
+def calibrate(calibrator: LogisticRegression, y_prob: np.ndarray) -> np.ndarray:
     """Apply calibration. Returns calibrated probabilities."""
-    calibrated = calibrator.predict(y_prob)
+    calibrated = calibrator.predict_proba(y_prob.reshape(-1, 1))[:, 1]
     return np.clip(calibrated, 0.01, 0.99)
 
 

@@ -1,0 +1,35 @@
+name: APEX-10 Tuesday Settlement
+
+on:
+  schedule:
+    - cron: '0 8 * * 2'   # Every Tuesday at 08:00 UTC
+  workflow_dispatch:        # Manual trigger button
+
+jobs:
+  settlement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Run settlement
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          APEX_ENV: production
+        run: python -m apex10.live.settlement

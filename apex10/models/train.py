@@ -123,6 +123,15 @@ def run_training(league: str = "EPL", n_trials: int = MODEL.OPTUNA_TRIALS) -> di
     lgbm_gate = check_brier_gate(y_test, lgbm_test_cal, model_name="LightGBM")
     xgb_gate = check_brier_gate(y_test, xgb_test_cal, model_name="XGBoost")
 
+    from apex10.models.diagnostics import dump_feature_importances
+    from apex10.models.features import ONPITCH_FEATURES, MARKET_FEATURES
+    from datetime import datetime, timezone
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+    
+    # Post-fit reliability / feature importance dump
+    dump_feature_importances(lgbm, ONPITCH_FEATURES, "LightGBM", run_id, lgbm_gate["passed"])
+    dump_feature_importances(xgb, MARKET_FEATURES, "XGBoost", run_id, xgb_gate["passed"])
+
     if not lgbm_gate["passed"] or not xgb_gate["passed"]:
         logger.error("❌ TRAINING FAILED — One or more models did not pass Brier gate.")
         logger.error(f"Environment: {APEX_ENV}, Gate: {MODEL.BRIER_GATE}")
@@ -186,7 +195,7 @@ def run_training(league: str = "EPL", n_trials: int = MODEL.OPTUNA_TRIALS) -> di
     }
 
     if not summary["production_safe"]:
-        logger.warning("⚠️  Models passed PAPER gate but are NOT production-safe. Stake = 0.00.")
+        logger.warning("WARNING: Models passed PAPER gate but are NOT production-safe. Stake = 0.00.")
     
     logger.info(f"═══ Training complete ═══\n{json.dumps(summary, indent=2, default=str)}")
     return summary

@@ -1,0 +1,42 @@
+{
+    "model": "LightGBM",
+    "status": "PASSED",
+    "top_10_features": {
+        "xg_home_l8": 35.5436,
+        "xga_home_l8": 31.65,
+        "form_pts_home_l5": 11.2953,
+        "form_pts_away_l5": 10.1773,
+        "xga_away_l8": 6.0524,
+        "xg_away_l8": 5.2814,
+        "ppda_home": 0.0,
+        "ppda_away": 0.0,
+        "ppda_delta": 0.0,
+        "injury_count_home": 0.0
+    },
+    "all_features": {
+        "xg_home_l8": 35.5436,
+        "xga_home_l8": 31.65,
+        "form_pts_home_l5": 11.2953,
+        "form_pts_away_l5": 10.1773,
+        "xga_away_l8": 6.0524,
+        "xg_away_l8": 5.2814,
+        "ppda_home": 0.0,
+        "ppda_away": 0.0,
+        "ppda_delta": 0.0,
+        "injury_count_home": 0.0,
+        "injury_count_away": 0.0,
+        "key_player_absent_home": 0.0,
+        "key_player_absent_away": 0.0,
+        "home_advantage": 0.0,
+        "h2h_win_rate_home": 0.0,
+        "clean_sheet_rate_home": 0.0,
+        "clean_sheet_rate_away": 0.0,
+        "weather_rain_mm": 0.0,
+        "weather_wind_kmh": 0.0,
+        "rivalry_index": 0.0,
+        "playstyle_counter_attack": 0.0,
+        "opponent_low_block": 0.0,
+        "travel_hours_away": 0.0,
+        "elo_diff": 0.0
+    }
+}

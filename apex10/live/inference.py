@@ -22,6 +22,7 @@ from apex10.config import APEX_ENV, LEAGUES
 from apex10.db import get_client
 from apex10.enrichment.clubelo import fetch_elo_ratings, get_elo_diff
 from apex10.enrichment.odds_api import fetch_live_odds, get_match_odds
+from apex10.enrichment.static_data import get_manager_days_in_post, is_key_player_absent
 from apex10.models.features import (
     MARKET_FEATURES,
     ONPITCH_FEATURES,
@@ -29,6 +30,7 @@ from apex10.models.features import (
 )
 from apex10.scoring.confidence import pick_best_bet
 from apex10.scoring.dixon_coles import derive_probabilities
+from apex10.live import notify
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +272,40 @@ def _fetch_league_fixtures(
     return fixtures
 
 
+def fetch_european_schedule() -> list[dict]:
+    """
+    Fetch completely season schedules for Champions League (4480), 
+    Europa League (4481), and Conference League (4843).
+    Returns a list of dicts: {"date": "YYYY-MM-DD", "home": team, "away": team}
+    """
+    season = _current_season_str()
+    european_matches = []
+    league_ids = [4480, 4481, 4843]
+    
+    with httpx.Client(timeout=15.0) as client:
+        for lid in league_ids:
+            url = f"https://www.thesportsdb.com/api/v1/json/3/eventsseason.php?id={lid}&s={season}"
+            import time
+            time.sleep(1.5) # TheSportsDB rate limit
+            
+            try:
+                resp = client.get(url)
+                if resp.status_code == 200:
+                    events = resp.json().get("events") or []
+                    for e in events:
+                        date_str = e.get("dateEvent")
+                        if date_str:
+                            european_matches.append({
+                                "date": date_str,
+                                "home": _normalise_sportsdb_team(e.get("strHomeTeam", "")),
+                                "away": _normalise_sportsdb_team(e.get("strAwayTeam", ""))
+                            })
+            except Exception as e:
+                logger.error(f"Failed to fetch Euro schedule {lid}: {e}")
+                
+    return european_matches
+
+
 def fetch_upcoming_fixtures() -> list[dict]:
     """
     Fetch upcoming fixtures across all supported leagues from TheSportsDB.
@@ -353,6 +389,80 @@ def _build_rolling_stats(db, team: str, role: str, n: int = 8) -> dict:
         "form_gd_l5": gd,
         "clean_sheet_rate": cs,
     }
+
+
+def _build_split_stats(db, team: str, role: str, n: int = 5) -> dict:
+    """
+    Build form stats exclusively from home matches (if role='home') 
+    or away matches (if role='away'). Useful for split-form signals.
+    """
+    if role == "home":
+        matches = (
+            db.table("matches")
+            .select("home_goals, away_goals")
+            .eq("home_team", team)
+            .eq("status", "finished")
+            .order("match_date", desc=True)
+            .limit(n)
+            .execute()
+        ).data or []
+        all_matches = [{"gf": m["home_goals"], "ga": m["away_goals"]} for m in matches]
+    else:
+        matches = (
+            db.table("matches")
+            .select("home_goals, away_goals")
+            .eq("away_team", team)
+            .eq("status", "finished")
+            .order("match_date", desc=True)
+            .limit(n)
+            .execute()
+        ).data or []
+        all_matches = [{"gf": m["away_goals"], "ga": m["home_goals"]} for m in matches]
+
+    if not all_matches:
+        return {"form_pts_l5": 7.5, "form_gd_l5": 1.0}
+
+    pts = sum(3 if m["gf"] > m["ga"] else (1 if m["gf"] == m["ga"] else 0) for m in all_matches)
+    gd = sum(m["gf"] - m["ga"] for m in all_matches)
+    
+    return {"form_pts_l5": pts, "form_gd_l5": gd}
+
+
+def _calc_h2h_win_rate(db, home: str, away: str, n: int = 5) -> float:
+    """Calculate home team win rate over last n H2H meetings."""
+    # Home team as home
+    matches1 = (
+        db.table("matches")
+        .select("home_goals, away_goals, match_date")
+        .eq("home_team", home)
+        .eq("away_team", away)
+        .eq("status", "finished")
+        .execute()
+    ).data or []
+    
+    # Home team as away
+    matches2 = (
+        db.table("matches")
+        .select("home_goals, away_goals, match_date")
+        .eq("home_team", away)
+        .eq("away_team", home)
+        .eq("status", "finished")
+        .execute()
+    ).data or []
+
+    all_matches = []
+    for m in matches1:
+        all_matches.append({"home_won": m["home_goals"] > m["away_goals"], "date": m["match_date"]})
+    for m in matches2:
+        all_matches.append({"home_won": m["away_goals"] > m["home_goals"], "date": m["match_date"]})
+
+    all_matches.sort(key=lambda x: x["date"], reverse=True)
+    recent = all_matches[:n]
+    if not recent:
+        return 0.5
+    
+    wins = sum(1 for m in recent if m["home_won"])
+    return float(wins / len(recent))
 
 
 def _build_xg_stats(db, team: str, n: int = 8) -> dict:
@@ -475,7 +585,79 @@ def _calc_fixture_congestion(db, team: str) -> float:
     return 7.0  # default
 
 
-def build_feature_vector(fixture: dict, db, elo_ratings: dict | None = None, live_odds: dict | None = None) -> dict:
+_league_tables = {}
+
+def _get_league_table(db, league: str) -> list[str]:
+    """
+    Calculate and return the current league table for a given league (current season).
+    Returns a list of team names ordered by points (descending), then GD (descending).
+    """
+    if league in _league_tables:
+        return _league_tables[league]
+        
+    season_start = "2025-08-01"
+    matches = (
+        db.table("matches")
+        .select("home_team, away_team, home_goals, away_goals")
+        .eq("league", league)
+        .eq("status", "finished")
+        .gte("match_date", season_start)
+        .execute()
+    ).data or []
+    
+    standings = {}
+    for m in matches:
+        h, a = m["home_team"], m["away_team"]
+        hg, ag = m["home_goals"], m["away_goals"]
+        
+        if h not in standings: standings[h] = {"pts": 0, "gd": 0}
+        if a not in standings: standings[a] = {"pts": 0, "gd": 0}
+        
+        standings[h]["gd"] += (hg - ag)
+        standings[a]["gd"] += (ag - hg)
+        
+        if hg > ag:
+            standings[h]["pts"] += 3
+        elif hg < ag:
+            standings[a]["pts"] += 3
+        else:
+            standings[h]["pts"] += 1
+            standings[a]["pts"] += 1
+            
+    # Sort by points desc, then GD desc
+    sorted_teams = sorted(standings.keys(), key=lambda t: (standings[t]["pts"], standings[t]["gd"]), reverse=True)
+    _league_tables[league] = sorted_teams
+    return sorted_teams
+
+def _get_team_ppda(db, team: str) -> float:
+    """
+    Fetches the most recent PPDA value for a given team.
+    Returns float PPDA, falling back to 11.5 if missing.
+    """
+    try:
+        response = (
+            db.table("team_ppda")
+            .select("ppda")
+            .eq("team", team)
+            .order("season", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if response.data and len(response.data) > 0 and response.data[0].get("ppda") is not None:
+            return float(response.data[0]["ppda"])
+    except Exception as e:
+        logger.debug(f"PPDA fetch failed for {team}: {e}")
+    return 11.5
+
+
+def build_feature_vector(
+    fixture: dict, 
+    db, 
+    elo_ratings: dict | None = None, 
+    live_odds: dict | None = None,
+    existing_opening_odds: dict | None = None,
+    european_schedule: list[dict] | None = None,
+) -> dict:
     """
     Build the full feature vector for one upcoming fixture.
     Uses real rolling stats + Elo + congestion where available, stubs for the rest.
@@ -494,6 +676,13 @@ def build_feature_vector(fixture: dict, db, elo_ratings: dict | None = None, liv
     # Build feature dict — start with stubs, override with real data
     features = dict(STUB_DEFAULTS)
 
+    # PPDA Pressing Intensity & Delta
+    ppda_home = _get_team_ppda(db, home_team)
+    ppda_away = _get_team_ppda(db, away_team)
+    features["ppda_home"] = ppda_home
+    features["ppda_away"] = ppda_away
+    features["ppda_delta"] = round(ppda_home - ppda_away, 2)
+
     # On-pitch features (real data)
     features["xg_home_l8"] = home_xg["xg_l8"]
     features["xga_home_l8"] = home_xg["xga_l8"]
@@ -510,6 +699,34 @@ def build_feature_vector(fixture: dict, db, elo_ratings: dict | None = None, liv
     features["clean_sheet_rate_home"] = home_stats["clean_sheet_rate"]
     features["clean_sheet_rate_away"] = away_stats["clean_sheet_rate"]
 
+    # Extended Enriched Features
+    home_split = _build_split_stats(db, home_team, "home")
+    away_split = _build_split_stats(db, away_team, "away")
+    features["form_pts_home_split_l5"] = home_split["form_pts_l5"]
+    features["form_pts_away_split_l5"] = away_split["form_pts_l5"]
+    features["form_gd_home_split_l5"] = home_split["form_gd_l5"]
+    features["form_gd_away_split_l5"] = away_split["form_gd_l5"]
+    
+    features["h2h_win_rate_home"] = _calc_h2h_win_rate(db, home_team, away_team)
+
+    # League context / Motivation
+    league = fixture["league"]
+    table = _get_league_table(db, league)
+    if table and home_team in table and away_team in table:
+        home_pos = table.index(home_team) + 1
+        away_pos = table.index(away_team) + 1
+        total_teams = len(table)
+        
+        features["title_race_home"] = 1.0 if home_pos <= 4 else 0.0
+        features["relegation_battle_away"] = 1.0 if away_pos >= (total_teams - 4) else 0.0
+        
+        home_mot = 2.0 if home_pos <= 4 or home_pos >= (total_teams - 4) else 1.0
+        away_mot = 2.0 if away_pos <= 4 or away_pos >= (total_teams - 4) else 1.0
+        features["motivation_asymmetry"] = home_mot - away_mot
+
+    features["manager_days_in_post"] = get_manager_days_in_post(home_team)
+    features["manager_days_in_post_away"] = get_manager_days_in_post(away_team)
+
     # Enriched features — Elo
     if elo_ratings:
         features["elo_diff"] = get_elo_diff(elo_ratings, home_team, away_team)
@@ -522,9 +739,45 @@ def build_feature_vector(fixture: dict, db, elo_ratings: dict | None = None, liv
     if live_odds:
         match_odds = get_match_odds(live_odds, home_team, away_team)
         if match_odds:
-            features["odds_opening_home"] = match_odds["home"]
-            features["odds_current_home"] = match_odds["home"]
-            features["odds_movement"] = 0.0  # opening == current for now
+            current = match_odds["home"]
+            opening = current
+            if existing_opening_odds and fixture["id"] in existing_opening_odds:
+                stored_opening = existing_opening_odds[fixture["id"]]
+                if stored_opening is not None:
+                    opening = stored_opening
+            
+            features["odds_opening_home"] = opening
+            features["odds_current_home"] = current
+            features["odds_movement"] = current - opening
+
+    # European Sandwich Score
+    if european_schedule:
+        try:
+            fix_date = date.fromisoformat(fixture["match_date"])
+            
+            def _has_euro_sandwich(team: str) -> float:
+                for em in european_schedule:
+                    if em["home"] == team or em["away"] == team:
+                        em_date = date.fromisoformat(em["date"])
+                        # Sandwich = Euro match played 1 to 4 days before OR after this league fixture
+                        diff = abs((em_date - fix_date).days)
+                        if 1 <= diff <= 4:
+                            return 1.0
+                return 0.0
+                
+            features["sandwich_score_home"] = _has_euro_sandwich(home_team)
+            features["sandwich_score_away"] = _has_euro_sandwich(away_team)
+        except ValueError:
+            pass
+
+    features["key_player_absent_home"] = is_key_player_absent(home_team)
+    features["key_player_absent_away"] = is_key_player_absent(away_team)
+
+    # True Oddsportal injected features
+    features["odds_dnb_home"] = fixture.get("odds_dnb_home")
+    features["odds_dnb_away"] = fixture.get("odds_dnb_away")
+    features["odds_ah_home"] = fixture.get("odds_ah_home")
+    features["odds_ah_away"] = fixture.get("odds_ah_away")
 
     return features
 
@@ -539,7 +792,7 @@ def score_fixture(features: dict, models: dict) -> dict:
     lgbm_raw = lgbm.predict(onpitch_vec)[0]
     lgbm_cal = models.get("lgbm_calibrator")
     if lgbm_cal is not None:
-        lgbm_prob = lgbm_cal.predict([lgbm_raw])[0]
+        lgbm_prob = lgbm_cal.predict_proba(np.array([[lgbm_raw]]))[:, 1][0]
     else:
         lgbm_prob = lgbm_raw
 
@@ -548,7 +801,7 @@ def score_fixture(features: dict, models: dict) -> dict:
     xgb_raw = xgb.predict_proba(market_vec)[0][1]
     xgb_cal = models.get("xgb_calibrator")
     if xgb_cal is not None:
-        xgb_prob = xgb_cal.predict([xgb_raw])[0]
+        xgb_prob = xgb_cal.predict_proba(np.array([[xgb_raw]]))[:, 1][0]
     else:
         xgb_prob = xgb_raw
 
@@ -662,6 +915,13 @@ def run_inference() -> dict:
     # Fetch live odds once for all fixtures (costs ~5 credits for 5 leagues)
     live_odds = fetch_live_odds()
 
+    # Fetch existing fixtures to preserve opening odds for movement tracking
+    existing_fixtures_resp = db.table("upcoming_fixtures").select("api_match_id, opening_odds").execute()
+    existing_opening_odds = {
+        row["api_match_id"]: row["opening_odds"] 
+        for row in (existing_fixtures_resp.data or [])
+    }
+
     with CacheRunLogger(db) as cache_log:
         # Fetch upcoming fixtures from TheSportsDB
         fixtures = fetch_upcoming_fixtures()
@@ -670,6 +930,9 @@ def run_inference() -> dict:
         if not fixtures:
             logger.warning("No upcoming fixtures found")
             return {"fixtures": 0, "scored": 0}
+
+        # Fetch European schedule for sandwich scores
+        euro_schedule = fetch_european_schedule()
 
         # Group fixtures by league
         from collections import defaultdict
@@ -693,7 +956,13 @@ def run_inference() -> dict:
 
             for fixture in league_fixtures:
                 try:
-                    features = build_feature_vector(fixture, db, elo_ratings=elo_ratings, live_odds=live_odds)
+                    features = build_feature_vector(
+                        fixture, db, 
+                        elo_ratings=elo_ratings, 
+                        live_odds=live_odds,
+                        existing_opening_odds=existing_opening_odds,
+                        european_schedule=euro_schedule
+                    )
                     probs = score_fixture(features, models)
 
                     # Dixon-Coles multi-market probabilities
@@ -739,14 +1008,14 @@ def run_inference() -> dict:
                         "match_date": fixture["match_date"],
                         "home_team": fixture["home_team"],
                         "away_team": fixture["away_team"],
-                        "lgbm_prob": best_prob,
-                        "xgb_prob": round(best_votes / 5.0, 2),  # encode votes as 0.0-1.0
+                        "lgbm_prob": probs["lgbm_prob"],
+                        "xgb_prob": probs["xgb_prob"],
                         "consensus_prob": best_prob,
                         "best_bet_type": best_bet_type,
                         "best_bet_odds": best_odds,
-                        "opening_odds": best_odds,
-                        "key_player_absent_home": 0,
-                        "key_player_absent_away": 0,
+                        "opening_odds": features.get("odds_opening_home", best_odds),
+                        "key_player_absent_home": is_key_player_absent(fixture["home_team"]),
+                        "key_player_absent_away": is_key_player_absent(fixture["away_team"]),
                         "features_complete": True,
                     }
                     scored.append(row)
@@ -778,6 +1047,41 @@ def run_inference() -> dict:
         "environment": APEX_ENV,
     }
     logger.info(f"═══ Inference complete ═══ {summary}")
+
+    # ── Discord notification ──────────────────────────────────────────
+    if scored:
+        # Build a readable ticket summary for the Discord message
+        combined_odds = 1.0
+        lines = []
+        for row in scored:
+            combined_odds *= row["best_bet_odds"]
+            lines.append(
+                f"• {row['home_team']} vs {row['away_team']} — "
+                f"{row['best_bet_type']} @{row['best_bet_odds']:.2f}"
+            )
+        ticket_body = "\n".join(lines)
+        week_label = scored[0]["match_date"][:10] if scored else "unknown"
+
+        notify.ticket_generated(
+            week=week_label,
+            legs=len(scored),
+            combined_odds=round(combined_odds, 2),
+            stake=0.0,  # paper trading — no real stake
+            win_rate=0.0,
+        )
+        # Also send the detailed leg breakdown
+        notify._send(
+            f"📋 **Ticket Legs:**\n{ticket_body}\n\n"
+            f"Combined odds: **{combined_odds:.2f}x** across "
+            f"{len(leagues_loaded)} leagues"
+        )
+    else:
+        notify.no_ticket_week(
+            week=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            reason=f"No fixtures survived filtering. "
+                   f"Found {len(fixtures)} fixtures, 0 scored.",
+        )
+
     return summary
 
 

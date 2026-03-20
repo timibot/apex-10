@@ -1,0 +1,35 @@
+{
+    "model": "XGBoost",
+    "status": "PASSED",
+    "top_10_features": {
+        "odds_current_home": 61.0776,
+        "odds_opening_home": 38.9224,
+        "odds_movement": 0.0,
+        "fixture_congestion_home": 0.0,
+        "fixture_congestion_away": 0.0,
+        "days_to_next_home": 0.0,
+        "days_to_next_away": 0.0,
+        "sandwich_score_home": 0.0,
+        "sandwich_score_away": 0.0,
+        "competition_weight_home": 0.0
+    },
+    "all_features": {
+        "odds_current_home": 61.0776,
+        "odds_opening_home": 38.9224,
+        "odds_movement": 0.0,
+        "fixture_congestion_home": 0.0,
+        "fixture_congestion_away": 0.0,
+        "days_to_next_home": 0.0,
+        "days_to_next_away": 0.0,
+        "sandwich_score_home": 0.0,
+        "sandwich_score_away": 0.0,
+        "competition_weight_home": 0.0,
+        "next_competition_weight_home": 0.0,
+        "manager_days_in_post": 0.0,
+        "manager_days_in_post_away": 0.0,
+        "motivation_asymmetry": 0.0,
+        "relegation_battle_away": 0.0,
+        "title_race_home": 0.0,
+        "elo_diff": 0.0
+    }
+}

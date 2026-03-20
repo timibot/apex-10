@@ -115,7 +115,9 @@ def upsert_historical_odds(records: list[dict], db_client) -> int:
     if not records:
         return 0
 
-    result = db_client.table("historical_odds").insert(records).execute()
+    result = db_client.table("historical_odds").upsert(
+        records, on_conflict="home_team,away_team,match_date,bookmaker"
+    ).execute()
     count = len(result.data) if result.data else 0
-    logger.info(f"Inserted {count} odds records")
+    logger.info(f"Upserted {count} odds records")
     return count

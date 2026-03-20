@@ -80,6 +80,7 @@ def _get_market_odds(
     market_key: str,
     match_odds: dict | None,
     dc_probs: dict | None = None,
+    features: dict | None = None,
 ) -> float | None:
     """
     Get bookmaker odds for a market.
@@ -90,8 +91,8 @@ def _get_market_odds(
     3. Derived via vig-ratio from related market
        (Over 1.5, Under 3.5 from Over 2.5)
     """
-    if not match_odds:
-        return None
+    if match_odds is None:
+        match_odds = {}
 
     # 1. Direct odds from Odds API
     DIRECT_MAP = {
@@ -101,6 +102,8 @@ def _get_market_odds(
         "over_2_5": "over_2_5",
         "under_2_5": "under_2_5",
         "under_3_5": "under_3_5",
+        "btts_yes": "btts_yes",
+        "btts_no": "btts_no",
     }
     if market_key in DIRECT_MAP and match_odds.get(DIRECT_MAP[market_key]):
         return match_odds[DIRECT_MAP[market_key]]
@@ -118,17 +121,23 @@ def _get_market_odds(
         implied = (1.0 / a) + (1.0 / d)
         return round(1.0 / implied, 3) if implied > 0 else None
 
-    if market_key == "dnb_home" and h > 1 and a > 1:
-        p_home = 1.0 / h
-        p_away = 1.0 / a
-        dnb = p_home / (p_home + p_away)
-        return round(1.0 / dnb, 3) if dnb > 0 else None
+    if market_key == "dnb_home":
+        if features and features.get("odds_dnb_home"):
+            return features["odds_dnb_home"]
+        if h > 1 and a > 1:
+            p_home = 1.0 / h
+            p_away = 1.0 / a
+            dnb = p_home / (p_home + p_away)
+            return round(1.0 / dnb, 3) if dnb > 0 else None
 
-    if market_key == "dnb_away" and h > 1 and a > 1:
-        p_home = 1.0 / h
-        p_away = 1.0 / a
-        dnb = p_away / (p_home + p_away)
-        return round(1.0 / dnb, 3) if dnb > 0 else None
+    if market_key == "dnb_away":
+        if features and features.get("odds_dnb_away"):
+            return features["odds_dnb_away"]
+        if h > 1 and a > 1:
+            p_home = 1.0 / h
+            p_away = 1.0 / a
+            dnb = p_away / (p_home + p_away)
+            return round(1.0 / dnb, 3) if dnb > 0 else None
 
     # 3. Vig-ratio derivation from CLOSEST available market
     #    Bookmaker vig = (bookmaker implied prob) / (model prob)
@@ -189,9 +198,60 @@ def _get_market_odds(
 
     # BTTS — no reliable derivation yet
     if market_key in ("btts_yes", "btts_no"):
-        return None
+        # We'll allow the API outage fallback to handle this below
+        pass
+
+    # 4. API Outage Fallback: Synthesize odds from Dixon-Coles probabilities
+    #    Add a standard 5% bookmaker overround (vig = 1.05)
+    #    This ensures the pipeline never collapses when The Odds API is down
+    if dc_probs and market_key in dc_probs:
+        model_prob = dc_probs[market_key]
+        if model_prob > 0.05:
+            # Add 5% margin to the probability
+            synthetic_prob = model_prob * 1.05
+            synthetic_prob = min(max(synthetic_prob, 0.05), 0.98)
+            derived_odds = round(1.0 / synthetic_prob, 2)
+            logger.debug(f"API Outage Fallback: Synthesized {market_key} odds @ {derived_odds}")
+            return derived_odds
 
     return None
+
+def _vote_ppda_signals(ppda_home: float, ppda_away: float, market: str) -> int:
+    """
+    Evaluates tactical pressing matchups.
+    Lower PPDA = Higher Pressing Intensity.
+    """
+    vote = 0
+    combined_ppda = ppda_home + ppda_away
+    abs_delta = abs(ppda_home - ppda_away)
+
+    if market in ["over_1_5", "over_2_5", "btts_yes"]:
+        if combined_ppda < 20.0: 
+            vote += 1
+        if abs_delta >= 3.5:
+            vote += 1
+        if combined_ppda >= 28.0:
+            vote -= 1
+
+    elif market in ["under_2_5", "under_3_5", "btts_no"]:
+        if combined_ppda >= 28.0:
+            vote += 1
+        if combined_ppda < 21.0 or abs_delta >= 4.0:
+            vote -= 1
+
+    elif market in ["home_win", "home_dnb", "home_ah_-0.5"]:
+        if ppda_home <= 10.5 and ppda_away >= 14.0:
+            vote += 1
+
+    elif market in ["away_win", "away_dnb", "away_ah_-0.5", "dc_x2"]:
+        if ppda_away <= 10.5 and ppda_home >= 14.0:
+            vote += 1
+            
+    elif market in ["dc_1x"]:
+        if ppda_home <= 10.5 and ppda_away >= 14.0:
+            vote += 1
+
+    return max(-1, min(1, vote))
 
 
 def _vote_signals(
@@ -212,17 +272,21 @@ def _vote_signals(
     threshold = POISSON_THRESHOLDS.get(market_key, 0.60)
     signals["poisson"] = dc_prob >= threshold
 
-    # Signal 2: Form alignment
-    home_form = features.get("form_pts_home_l5", 0)
-    away_form = features.get("form_pts_away_l5", 0)
+    # Signal 2: Form alignment + H2H
+    # Use strict home/away form splits if available, otherwise fallback
+    home_form = features.get("form_pts_home_split_l5", features.get("form_pts_home_l5", 0))
+    away_form = features.get("form_pts_away_split_l5", features.get("form_pts_away_l5", 0))
+    h2h_win = features.get("h2h_win_rate_home", 0.5)
+
     if direction == "home":
-        signals["form"] = home_form > away_form
+        # Better form, or equal form but dominant H2H
+        signals["form"] = (home_form > away_form) or (home_form == away_form and h2h_win > 0.5)
     elif direction == "away":
-        signals["form"] = away_form > home_form
+        signals["form"] = (away_form > home_form) or (away_form == home_form and h2h_win < 0.5)
     else:
         # Neutral (goals markets) — both teams have some scoring form
-        home_gd = features.get("form_gd_home_l5", 0)
-        away_gd = features.get("form_gd_away_l5", 0)
+        home_gd = features.get("form_gd_home_split_l5", features.get("form_gd_home_l5", 0))
+        away_gd = features.get("form_gd_away_split_l5", features.get("form_gd_away_l5", 0))
         if market_key in ("over_1_5", "over_2_5", "btts_yes"):
             # High scoring form supports overs/btts
             signals["form"] = (home_gd + away_gd) > 0
@@ -270,6 +334,31 @@ def _vote_signals(
     return signals
 
 
+def _vote_market_intelligence(odds_movement: float, market: str) -> int:
+    """Evaluates sharp money movement for home markets."""
+    if "home" in market or market in ["dc_1x"]:
+        if odds_movement >= 0.08:  # Severe drift
+            return -2  
+        elif odds_movement <= -0.05: # Line is steaming
+            return +1
+    return 0
+
+def _vote_rotation_and_absence(sandwich_score_home: int, key_player_absent_home: int, sandwich_score_away: int, key_player_absent_away: int, market: str) -> int:
+    """Penalizes teams distracted by Europe or missing their absolute best player."""
+    vote = 0
+    if "home" in market or market in ["dc_1x"]:
+        if sandwich_score_home == 1:
+            vote -= 1
+        if key_player_absent_home == 1:
+            vote -= 2
+    elif "away" in market or market in ["dc_x2"]:
+        if sandwich_score_away == 1:
+            vote -= 1
+        if key_player_absent_away == 1:
+            vote -= 2
+    return vote
+
+
 def score_all_markets(
     dc_probs: dict,
     features: dict,
@@ -289,13 +378,36 @@ def score_all_markets(
         if dc_prob < 0.01:
             continue
 
-        odds = _get_market_odds(prob_key, match_odds, dc_probs)
+        odds = _get_market_odds(prob_key, match_odds, dc_probs, features)
         if odds is None or odds <= 1.0:
             # No real or derivable bookmaker odds — skip
             continue
 
         signals = _vote_signals(prob_key, direction, dc_prob, odds, features, elo_diff)
-        votes = sum(1 for v in signals.values() if v)
+        votes = sum(1 for v in signals.values() if v is True)
+
+        ppda_vote = _vote_ppda_signals(
+            features.get("ppda_home", 11.5), 
+            features.get("ppda_away", 11.5), 
+            prob_key
+        )
+        
+        # Phase 2 Vetoes
+        kpa_home = features.get("key_player_absent_home", 0)
+        odds_move = features.get("odds_movement", 0.0)
+        
+        odds_vote = _vote_market_intelligence(odds_move, prob_key)
+        rotation_vote = _vote_rotation_and_absence(
+            features.get("sandwich_score_home", 0),
+            kpa_home,
+            features.get("sandwich_score_away", 0),
+            features.get("key_player_absent_away", 0),
+            prob_key
+        )
+        
+        votes = max(0, min(5, votes + ppda_vote + odds_vote + rotation_vote))
+        signals["ppda_adj"] = ppda_vote > 0  # Just for debug output visibility
+        signals["veto"] = (odds_vote + rotation_vote) < 0
 
         picks.append(MarketPick(
             market=label,

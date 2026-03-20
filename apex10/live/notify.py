@@ -25,6 +25,7 @@ class AlertLevel(Enum):
 def _send(message: str) -> bool:
     """
     Send a message to the configured Discord webhook.
+    Splits the message if it exceeds the 2000-character limit.
     Returns True on success, False on any failure. Never raises.
     """
     try:
@@ -34,9 +35,30 @@ def _send(message: str) -> bool:
                 "No Discord webhook configured — skipping notification"
             )
             return False
+            
+        # Split by newlines to keep markdown formatting clean and chunk below 1900 chars
+        lines = message.split("\n")
+        chunks = []
+        current_chunk = ""
+        
+        for line in lines:
+            if len(current_chunk) + len(line) + 1 > 1900:
+                chunks.append(current_chunk)
+                current_chunk = line
+            else:
+                current_chunk = f"{current_chunk}\n{line}" if current_chunk else line
+                
+        if current_chunk:
+            chunks.append(current_chunk)
+
         with httpx.Client(timeout=10.0) as client:
-            resp = client.post(cfg.DISCORD_WEBHOOK, json={"content": message})
-            resp.raise_for_status()
+            for i, chunk in enumerate(chunks):
+                resp = client.post(cfg.DISCORD_WEBHOOK, json={"content": chunk})
+                resp.raise_for_status()
+                if i < len(chunks) - 1:
+                    import time
+                    time.sleep(1.0)  # Prevent webhook rate limiting
+
         return True
     except Exception as e:
         logger.error(f"Discord notification failed: {e}")

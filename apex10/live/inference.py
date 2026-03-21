@@ -241,37 +241,46 @@ def _fetch_league_fixtures(
     if not unplayed_events:
         return []
         
-    # We only want matches happening in the immediate upcoming window (next 5 days).
-    # This completely bypasses bugs where a mathematically lower rescheduled round
-    # (e.g. round 17 played in April) hijacks the round calculation.
-    from datetime import timedelta
+    # 2. Extract the 'True Active Round' by finding the maximum round number 
+    # among matches occurring in the next 5 days. This sidesteps straggling
+    # makeup games from earlier rounds while keeping round-by-round integrity.
+    from datetime import date, timedelta
     cutoff = date.today() + timedelta(days=5)
 
-    fixtures = []
+    upcoming_in_window = []
     for event in unplayed_events:
         date_str = event.get("dateEvent")
         try:
-            event_date = date.fromisoformat(date_str)
-            if event_date > cutoff:
-                continue
+            if date.fromisoformat(date_str) <= cutoff:
+                upcoming_in_window.append(event)
         except (ValueError, TypeError):
+            continue
+
+    if not upcoming_in_window:
+        return []
+
+    active_round = max(int(e.get("intRound") or 0) for e in upcoming_in_window)
+
+    fixtures = []
+    for event in unplayed_events:
+        round_num = int(event.get("intRound") or 999)
+        if round_num != active_round:
             continue
             
         home = _normalise_sportsdb_team(event.get("strHomeTeam", ""))
         away = _normalise_sportsdb_team(event.get("strAwayTeam", ""))
-        round_num = int(event.get("intRound") or 999)
         
         fixtures.append({
             "id": int(event.get("idEvent", 0)),
             "league": league_name,
-            "match_date": date_str,
+            "match_date": event.get("dateEvent", ""),
             "home_team": home,
             "away_team": away,
             "round": round_num,
             "time": event.get("strTime", ""),
         })
 
-    logger.info(f"  {league_name}: {len(fixtures)} upcoming fixtures in 5-day window")
+    logger.info(f"  {league_name} R{active_round}: {len(fixtures)} upcoming")
     return fixtures
 
 
@@ -1059,7 +1068,7 @@ def run_inference() -> dict:
     # ── Ticket Generation & Discord notification ──────────────────────
     if scored:
         from apex10.filters.gates import Candidate, run_all_gates
-        from apex10.ticket.optimizer import build_ticket
+        from apex10.ticket.optimizer import build_tickets
 
         candidates = []
         for row in scored:
@@ -1087,33 +1096,47 @@ def run_inference() -> dict:
             )
 
         qualified, rejections = run_all_gates(candidates)
-        ticket = build_ticket(qualified)
+        safe_ticket, master_ticket = build_tickets(qualified)
 
-        if ticket.no_ticket:
+        if master_ticket.no_ticket:
             notify.no_ticket_week(
                 week=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                reason=ticket.reason,
+                reason=master_ticket.reason,
             )
         else:
             week_label = scored[0]["match_date"][:10] if scored else "unknown"
             
-            lines = []
-            for leg in ticket.legs:
-                edge = leg.consensus_prob - (1 / leg.odds if leg.odds > 0 else 1.0)
-                lines.append(
-                    f"• {leg.home_team} vs {leg.away_team} — "
-                    f"**{leg.bet_type} @{leg.odds:.2f}** [{leg.confidence_votes}/5 Votes] "
-                    f"(Prob: {leg.consensus_prob:.1%} | Edge: {edge:+.1%})"
-                )
-            ticket_body = "\n".join(lines)
+            def _format_ticket(ticket) -> str:
+                lines = []
+                for leg in ticket.legs:
+                    edge = leg.consensus_prob - (1 / leg.odds if leg.odds > 0 else 1.0)
+                    lines.append(
+                        f"• {leg.home_team} vs {leg.away_team} — "
+                        f"**{leg.bet_type} @{leg.odds:.2f}** [{leg.confidence_votes}/5 Votes] "
+                        f"(Prob: {leg.consensus_prob:.1%} | Edge: {edge:+.1%})"
+                    )
+                return "\n".join(lines)
 
+            # Ticket 1: Safe 10x Odds
             notify.ticket_generated(
                 week=week_label,
-                legs=len(ticket.legs),
-                combined_odds=ticket.combined_odds,
+                title="Safe ~10x Target Slip",
+                legs=len(safe_ticket.legs),
+                combined_odds=safe_ticket.combined_odds,
                 stake=0.0,
-                win_rate=ticket.simulated_win_rate,
-                breakdown=ticket_body,
+                win_rate=safe_ticket.simulated_win_rate,
+                breakdown=_format_ticket(safe_ticket),
+            )
+            
+            # Ticket 2: Full Master List
+            notify.ticket_generated(
+                week=week_label,
+                title="Full Uncapped Master List",
+                legs=len(master_ticket.legs),
+                combined_odds=master_ticket.combined_odds,
+                stake=0.0,
+                win_rate=master_ticket.simulated_win_rate,
+                breakdown=_format_ticket(master_ticket),
             )
     else:
         notify.no_ticket_week(

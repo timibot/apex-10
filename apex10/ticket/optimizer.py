@@ -85,18 +85,34 @@ def _sort_candidates(candidates: list[Candidate]) -> list[Candidate]:
     )
 
 
-def build_ticket(qualified: list[Candidate]) -> Ticket:
-    """
-    Greedy accumulation:
-      1. Sort candidates by probability DESC, confidence DESC, odds DESC
-      2. Multiply odds until product >= 10.0
-      3. Stop immediately — no extra legs
+def _create_ticket_object(legs: list[TicketLeg], product: float) -> Ticket:
+    if not legs:
+        return Ticket(
+            legs=[], combined_odds=1.0, simulated_win_rate=0.0,
+            ci_low=0.0, ci_high=0.0, no_ticket=True, reason="Empty list"
+        )
+    win_rate, ci_low, ci_high = monte_carlo_win_probability(legs)
+    return Ticket(
+        legs=legs,
+        combined_odds=round(product, 3),
+        simulated_win_rate=round(win_rate, CONFIDENCE_ROUNDING),
+        ci_low=round(ci_low, CONFIDENCE_ROUNDING),
+        ci_high=round(ci_high, CONFIDENCE_ROUNDING),
+    )
 
-    Returns Ticket with no_ticket=True if not enough qualified legs.
+
+def build_tickets(qualified: list[Candidate]) -> tuple[Ticket, Ticket]:
+    """
+    Greedy compilation of two simultaneous tickets:
+      1. Safe 10x Ticket: Multiply highest-confidence legs until product >= 10.0
+      2. Master Uncapped List: Every single qualified match this week.
+
+    Returns (safe_10x_ticket, master_ticket).
+    If no candidates passed, both return with no_ticket=True.
     """
     if not qualified:
-        logger.warning("No qualified candidates — no ticket this week")
-        return Ticket(
+        logger.warning("No qualified candidates — no tickets this week")
+        empty = Ticket(
             legs=[],
             combined_odds=1.0,
             simulated_win_rate=0.0,
@@ -105,10 +121,15 @@ def build_ticket(qualified: list[Candidate]) -> Ticket:
             no_ticket=True,
             reason="No candidates passed all 6 gates",
         )
+        return empty, empty
 
     sorted_candidates = _sort_candidates(qualified)
-    selected_legs: list[TicketLeg] = []
-    running_product = 1.0
+    master_legs: list[TicketLeg] = []
+    master_product = 1.0
+
+    safe_legs: list[TicketLeg] = []
+    safe_product = 1.0
+    safe_target_hit = False
 
     for c in sorted_candidates:
         leg = TicketLeg(
@@ -126,27 +147,31 @@ def build_ticket(qualified: list[Candidate]) -> Ticket:
             confidence_votes=c.confidence_votes,
             tier=c.tier.value if isinstance(c.tier, ConfidenceTier) else str(c.tier),
         )
-        selected_legs.append(leg)
-        running_product = round(running_product * c.odds, 4)
+        
+        # Build master uncapped list
+        master_legs.append(leg)
+        master_product = master_product * c.odds
+        
+        # Build precision 10x target slip
+        if not safe_target_hit:
+            safe_legs.append(leg)
+            safe_product = safe_product * c.odds
+            if safe_product >= ODDS.TARGET_PRODUCT:
+                safe_target_hit = True
 
-    if running_product < ODDS.TARGET_PRODUCT:
+    if not safe_target_hit:
         logger.info(
-            f"Note: Generated ticket product ({running_product:.2f}x) "
+            f"Note: Generated ticket product ({safe_product:.2f}x) "
             f"is below target ({ODDS.TARGET_PRODUCT}x). Proceeding dynamically."
         )
 
-    win_rate, ci_low, ci_high = monte_carlo_win_probability(selected_legs)
+    safe_ticket = _create_ticket_object(safe_legs, safe_product)
+    master_ticket = _create_ticket_object(master_legs, master_product)
 
-    ticket = Ticket(
-        legs=selected_legs,
-        combined_odds=round(running_product, 3),
-        simulated_win_rate=round(win_rate, CONFIDENCE_ROUNDING),
-        ci_low=round(ci_low, CONFIDENCE_ROUNDING),
-        ci_high=round(ci_high, CONFIDENCE_ROUNDING),
-    )
-
-    logger.info(str(ticket))
-    return ticket
+    logger.info("--- SAFE 10x TICKET ---")
+    logger.info(str(safe_ticket))
+    
+    return safe_ticket, master_ticket
 
 
 def monte_carlo_win_probability(

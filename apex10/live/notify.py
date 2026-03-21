@@ -74,6 +74,7 @@ def _fmt(level: AlertLevel, title: str, body: str) -> str:
 
 def ticket_generated(
     week: str,
+    title: str,
     legs: int,
     combined_odds: float,
     stake: float,
@@ -90,7 +91,7 @@ def ticket_generated(
         
     return _send(_fmt(
         AlertLevel.SUCCESS,
-        "Ticket Generated",
+        f"Ticket Generated — {title}",
         body,
     ))
 

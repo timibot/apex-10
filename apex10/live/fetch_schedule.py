@@ -19,18 +19,20 @@ def run():
     logger.info(f"═══ APEX-10 Schedule Fetcher ({APEX_ENV}) ═══")
     
     # We only fetch major leagues for the core model
-    leagues = LeagueConfig.ACTIVE_LEAGUES
-    league_ids = LeagueConfig.LEAGUE_IDS
+    thesportsdb_leagues = {
+        "Premier League": 4328,
+        "La Liga": 4335,
+        "Bundesliga": 4331,
+        "Serie A": 4332,
+        "Ligue 1": 4334,
+    }
     season = "2025-2026"
     
     all_fixtures = []
     
     with httpx.Client(timeout=15.0) as client:
         # 1. Fetch Major Leagues
-        for league_name in leagues:
-            lid = league_ids.get(league_name)
-            if not lid:
-                continue
+        for league_name, lid in thesportsdb_leagues.items():
             
             try:
                 fixtures = _fetch_league_fixtures(client, league_name, lid, season)

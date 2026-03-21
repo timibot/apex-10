@@ -1,0 +1,32 @@
+name: APEX-10 Static Schedule Cacher
+
+on:
+  schedule:
+    - cron: '0 22 * * 4'  # Every Thursday at 22:00 UTC
+  workflow_dispatch:        # Manual trigger button
+
+jobs:
+  cache_schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Run schedule fetcher
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          APEX_ENV: production
+        run: python -m apex10.live.fetch_schedule

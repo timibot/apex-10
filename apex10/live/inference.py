@@ -340,25 +340,49 @@ def fetch_european_schedule() -> list[dict]:
 
 def fetch_upcoming_fixtures() -> list[dict]:
     """
-    Fetch upcoming fixtures across all supported leagues from TheSportsDB.
+    Fetch upcoming fixtures across all supported leagues from the Supabase cache.
+    This eliminates TheSportsDB API calls from the main engine entirely.
     Filters out matches that have already kicked off using date + time.
     """
-    season = _current_season_str()
-    logger.info(f"Fetching fixtures from TheSportsDB (season={season})...")
+    from datetime import date
+    from apex10.db import get_client
 
-    all_fixtures = []
-    with httpx.Client(timeout=15.0) as client:
-        for league_name, league_id in THESPORTSDB_LEAGUES.items():
-            try:
-                league_fixtures = _fetch_league_fixtures(
-                    client, league_name, league_id, season
-                )
-                all_fixtures.extend(league_fixtures)
-            except Exception as e:
-                logger.error(f"Failed to fetch {league_name}: {e}")
+    db = get_client()
+    today_str = date.today().isoformat()
+    
+    # 1. Pull the cached schedule from Supabase
+    try:
+        response = db.table("weekly_schedule").select("*").gte("match_date", today_str).execute()
+        cached_matches = response.data or []
+    except Exception as e:
+        logger.error(f"Failed to fetch weekly_schedule from Supabase: {e}")
+        return []
 
-    logger.info(f"Found {len(all_fixtures)} upcoming fixtures across {len(THESPORTSDB_LEAGUES)} leagues")
-    return all_fixtures
+    if not cached_matches:
+        logger.warning("No matches found in the weekly_schedule cache. Has fetch_schedule.py run?")
+        return []
+
+    # 2. Filter out matches that have kicked off
+    valid_fixtures = []
+    for row in cached_matches:
+        # Check kickoff
+        d_str = row.get("match_date")
+        t_str = row.get("match_time", "")
+        if d_str and _has_kicked_off(d_str, t_str):
+            continue
+            
+        valid_fixtures.append({
+            "id": row["fixture_id"],
+            "league": row["league"],
+            "match_date": d_str,
+            "home_team": row["home_team"],
+            "away_team": row["away_team"],
+            "round": row["round"],
+            "time": t_str
+        })
+
+    logger.info(f"Loaded {len(valid_fixtures)} un-kicked-off fixtures from Supabase cache.")
+    return valid_fixtures
 
 
 def _build_rolling_stats(db, team: str, role: str, n: int = 8) -> dict:

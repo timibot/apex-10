@@ -241,32 +241,37 @@ def _fetch_league_fixtures(
     if not unplayed_events:
         return []
         
-    # Determine the active round (lowest round number among unplayed)
-    try:
-        active_round = min(int(e.get("intRound") or 999) for e in unplayed_events)
-    except Exception:
-        active_round = None
+    # We only want matches happening in the immediate upcoming window (next 5 days).
+    # This completely bypasses bugs where a mathematically lower rescheduled round
+    # (e.g. round 17 played in April) hijacks the round calculation.
+    from datetime import timedelta
+    cutoff = date.today() + timedelta(days=5)
 
     fixtures = []
     for event in unplayed_events:
-        round_num = int(event.get("intRound") or 999)
-        if active_round is not None and round_num != active_round:
+        date_str = event.get("dateEvent")
+        try:
+            event_date = date.fromisoformat(date_str)
+            if event_date > cutoff:
+                continue
+        except (ValueError, TypeError):
             continue
             
         home = _normalise_sportsdb_team(event.get("strHomeTeam", ""))
         away = _normalise_sportsdb_team(event.get("strAwayTeam", ""))
+        round_num = int(event.get("intRound") or 999)
         
         fixtures.append({
             "id": int(event.get("idEvent", 0)),
             "league": league_name,
-            "match_date": event.get("dateEvent", ""),
+            "match_date": date_str,
             "home_team": home,
             "away_team": away,
             "round": round_num,
             "time": event.get("strTime", ""),
         })
 
-    logger.info(f"  {league_name} R{active_round}: {len(fixtures)} upcoming")
+    logger.info(f"  {league_name}: {len(fixtures)} upcoming fixtures in 5-day window")
     return fixtures
 
 

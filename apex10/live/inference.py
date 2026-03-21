@@ -204,117 +204,137 @@ def _fetch_league_fixtures(
     season: str,
 ) -> list[dict]:
     """
-    Fetch upcoming fixtures for one league using a single season call.
-    Filters to find the next active round with unplayed matches to avoid TheSportsDB 429 limits.
+    Intelligently probes eventsround.php to find the current active Matchweek.
+    Bypasses the TheSportsDB 15-game truncation limit on eventsseason.php.
+    Estimates the round chronologically to avoid 429 rate limits.
     """
-    url = f"https://www.thesportsdb.com/api/v1/json/3/eventsseason.php?id={league_id}&s={season}"
+    from datetime import date
+    import time
     
-    import time as _time
-    _time.sleep(2.0)  # Rate limit: TheSportsDB free tier
-
-    for attempt in range(3):
-        response = client.get(url)
-        if response.status_code == 429:
-            wait = 5 * (attempt + 1)
-            logger.warning(f"Rate limited, waiting {wait}s (attempt {attempt+1}/3)")
-            _time.sleep(wait)
-            continue
-        response.raise_for_status()
-        break
-    else:
-        logger.warning(f"Giving up on {league_name} season fetch after 3 rate limit retries")
-        return []
-
-    events = response.json().get("events") or []
+    today = date.today()
+    start_year = today.year if today.month >= 8 else today.year - 1
+    start_date = date(start_year, 8, 15)
+    days_since_start = max(0, (today - start_date).days)
     
-    # 1. Look at all events that haven't kicked off and find the lowest intRound
-    unplayed_events = []
-    for event in events:
-        date_str = event.get("dateEvent")
-        if not date_str:  # Skip postponed/unscheduled matches with no date
+    # Estimate ~1 round per week, minus 2 weeks for winter/international breaks
+    estimated_r = max(1, min(38, (days_since_start // 7) + 1 - 2))
+    
+    # Search closest chronological rounds first
+    probe_offsets = [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 7, -7]
+    
+    active_events = []
+    found_round = 0
+    
+    for offset in probe_offsets:
+        r = estimated_r + offset
+        if r < 1 or r > 40:
             continue
             
-        time_str = event.get("strTime", "")
-        if not _has_kicked_off(date_str, time_str):
-            unplayed_events.append(event)
-            
-    if not unplayed_events:
-        return []
+        url = f"https://www.thesportsdb.com/api/v1/json/3/eventsround.php?id={league_id}&r={r}&s={season}"
+        time.sleep(2.0)  # Safe free tier delay
         
-    # 2. Extract the 'True Active Round' by finding the maximum round number 
-    # among matches occurring in the next 5 days. This sidesteps straggling
-    # makeup games from earlier rounds while keeping round-by-round integrity.
-    from datetime import date, timedelta
-    cutoff = date.today() + timedelta(days=5)
-
-    upcoming_in_window = []
-    for event in unplayed_events:
-        date_str = event.get("dateEvent")
-        try:
-            if date.fromisoformat(date_str) <= cutoff:
-                upcoming_in_window.append(event)
-        except (ValueError, TypeError):
+        for attempt in range(2):
+            resp = client.get(url)
+            if resp.status_code == 429:
+                time.sleep(5.0 * (attempt + 1))
+                continue
+            break
+        else:
             continue
-
-    if not upcoming_in_window:
+            
+        events = resp.json().get("events") or []
+        
+        # Does this round have upcoming matches?
+        has_upcoming = False
+        for e in events:
+            d_str = e.get("dateEvent")
+            t_str = e.get("strTime", "")
+            if d_str and not _has_kicked_off(d_str, t_str):
+                has_upcoming = True
+                break
+                
+        if has_upcoming:
+            active_events = events
+            found_round = r
+            break
+            
+    if not active_events:
         return []
-
-    active_round = max(int(e.get("intRound") or 0) for e in upcoming_in_window)
 
     fixtures = []
-    for event in unplayed_events:
-        round_num = int(event.get("intRound") or 999)
-        if round_num != active_round:
+    for event in active_events:
+        date_str = event.get("dateEvent")
+        time_str = event.get("strTime", "")
+        
+        if not date_str:
+            continue
+        if _has_kicked_off(date_str, time_str):
             continue
             
         home = _normalise_sportsdb_team(event.get("strHomeTeam", ""))
         away = _normalise_sportsdb_team(event.get("strAwayTeam", ""))
+        round_num = int(event.get("intRound") or found_round)
         
         fixtures.append({
             "id": int(event.get("idEvent", 0)),
             "league": league_name,
-            "match_date": event.get("dateEvent", ""),
+            "match_date": date_str,
             "home_team": home,
             "away_team": away,
             "round": round_num,
-            "time": event.get("strTime", ""),
+            "time": time_str,
         })
 
-    logger.info(f"  {league_name} R{active_round}: {len(fixtures)} upcoming")
+    logger.info(f"  {league_name} R{found_round}: {len(fixtures)} upcoming fixtures found via probe")
     return fixtures
 
 
 def fetch_european_schedule() -> list[dict]:
     """
-    Fetch completely season schedules for Champions League (4480), 
-    Europa League (4481), and Conference League (4843).
+    Fetch upcoming schedules for Champions League, Europa League, and Conference League.
+    Bypasses TheSportsDB 15-game truncations by exclusively querying the robust Odds API.
     Returns a list of dicts: {"date": "YYYY-MM-DD", "home": team, "away": team}
     """
-    season = _current_season_str()
+    import os
+    api_key = os.getenv("ODDS_API_KEY")
     european_matches = []
-    league_ids = [4480, 4481, 4843]
+    
+    if not api_key:
+        logger.warning("No ODDS_API_KEY found, skipping European schedule fetch")
+        return []
+
+    # The exact Odds API keys for European competitions
+    league_keys = [
+        "soccer_uefa_champs_league",
+        "soccer_uefa_europa_league",
+        "soccer_uefa_europa_conference_league"
+    ]
     
     with httpx.Client(timeout=15.0) as client:
-        for lid in league_ids:
-            url = f"https://www.thesportsdb.com/api/v1/json/3/eventsseason.php?id={lid}&s={season}"
-            import time
-            time.sleep(1.5) # TheSportsDB rate limit
+        for l_key in league_keys:
+            url = f"https://api.the-odds-api.com/v4/sports/{l_key}/events?apiKey={api_key}"
             
             try:
                 resp = client.get(url)
                 if resp.status_code == 200:
-                    events = resp.json().get("events") or []
+                    events = resp.json()
                     for e in events:
-                        date_str = e.get("dateEvent")
+                        date_str = e.get("commence_time", "")[:10]
                         if date_str:
                             european_matches.append({
                                 "date": date_str,
-                                "home": _normalise_sportsdb_team(e.get("strHomeTeam", "")),
-                                "away": _normalise_sportsdb_team(e.get("strAwayTeam", ""))
+                                "home": _normalise_sportsdb_team(e.get("home_team", "")),
+                                "away": _normalise_sportsdb_team(e.get("away_team", ""))
                             })
+                elif resp.status_code == 422:
+                    # Odds API throws 422 if the league is out of season / unavailable
+                    pass
+                else:
+                    logger.warning(f"Odds API {l_key} fetch failed: {resp.status_code}")
             except Exception as e:
-                logger.error(f"Failed to fetch Euro schedule {lid}: {e}")
+                logger.error(f"Error fetching {l_key} schedule: {e}")
                 
+    logger.info(f"Loaded {len(european_matches)} European fixtures for fatigue analysis")
     return european_matches
 
 

@@ -37,4 +37,4 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
           APEX_ENV: production
-        run: python -m apex10.live.inference
+        run: python test_pipeline.py

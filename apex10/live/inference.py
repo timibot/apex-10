@@ -1,6 +1,6 @@
 """
 Live inference engine — Phase 7.
-Fetches upcoming fixtures from TheSportsDB (free, no API key needed),
+Reads upcoming fixtures from Supabase weekly_schedule cache,
 builds feature vectors, scores with trained models,
 and writes predictions to upcoming_fixtures table for the ticket pipeline.
 

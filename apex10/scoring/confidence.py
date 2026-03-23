@@ -21,9 +21,10 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-# Odds range for accumulator legs
-ODDS_MIN = 1.10
-ODDS_MAX = 1.50
+# Odds range for accumulator legs — synced with config.py
+from apex10.config import ODDS
+ODDS_MIN = ODDS.MIN_ODDS   # 1.20
+ODDS_MAX = ODDS.MAX_ODDS   # 1.49
 
 
 @dataclass

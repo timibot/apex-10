@@ -1,15 +1,19 @@
 """
-Standalone worker to fetch the 50 major league matches for the upcoming weekend.
-Runs once per week. Caches the fixtures into the Supabase `weekly_schedule` table.
+Standalone worker to fetch the ~50 major league matches for the upcoming weekend.
+Runs once per week (Thursday night via GitHub Actions).
+Caches the fixtures into the Supabase `weekly_schedule` table.
+
+NOTE: UEFA fixtures are NOT cached here — they are fetched directly by
+inference.py for fatigue/sandwich scoring only.
 """
 import logging
 from datetime import datetime, timezone
 
 import httpx
 
-from apex10.config import LeagueConfig, APEX_ENV
+from apex10.config import APEX_ENV
 from apex10.db import get_client
-from apex10.live.inference import _fetch_league_fixtures, fetch_european_schedule
+from apex10.live.inference import _fetch_league_fixtures, _current_season_str
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -26,35 +30,17 @@ def run():
         "Serie A": 4332,
         "Ligue 1": 4334,
     }
-    season = "2025-2026"
+    season = _current_season_str()  # Dynamic: e.g. "2025-2026"
     
     all_fixtures = []
     
     with httpx.Client(timeout=15.0) as client:
-        # 1. Fetch Major Leagues
         for league_name, lid in thesportsdb_leagues.items():
-            
             try:
                 fixtures = _fetch_league_fixtures(client, league_name, lid, season)
                 all_fixtures.extend(fixtures)
             except Exception as e:
                 logger.error(f"Failed fetching {league_name}: {e}")
-                
-        # 2. Fetch European Schedules
-        try:
-            euro_fixtures = fetch_european_schedule()
-            for ef in euro_fixtures:
-                all_fixtures.append({
-                    "id": 0, # UEFA matches don't use SportsDB IDs in our pipeline
-                    "league": "UEFA",
-                    "match_date": ef["date"],
-                    "home_team": ef["home"],
-                    "away_team": ef["away"],
-                    "round": 0,
-                    "time": "00:00"
-                })
-        except Exception as e:
-            logger.error(f"Failed fetching European schedule: {e}")
 
     if not all_fixtures:
         logger.warning("No fixtures found to cache.")

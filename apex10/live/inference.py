@@ -351,8 +351,8 @@ def fetch_upcoming_fixtures() -> list[dict]:
     db = get_client()
     today = date.today()
     today_str = today.isoformat()
-    # Upper bound: only look 8 days ahead — keeps us strictly within the current week's round
-    window_end_str = (today + timedelta(days=8)).isoformat()
+    # Upper bound: only look 6 days ahead — keeps us strictly within the current week's round
+    window_end_str = (today + timedelta(days=6)).isoformat()
 
     # 1. Pull the cached schedule — bounded to current week only
     try:

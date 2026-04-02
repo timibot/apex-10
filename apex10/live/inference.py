@@ -341,36 +341,48 @@ def fetch_european_schedule() -> list[dict]:
 def fetch_upcoming_fixtures() -> list[dict]:
     """
     Fetch upcoming fixtures across all supported leagues from the Supabase cache.
-    This eliminates TheSportsDB API calls from the main engine entirely.
-    Filters out matches that have already kicked off using date + time.
+    Only returns fixtures within the next 8 days to prevent future-week games from
+    bleeding into the current inference run (e.g. during international breaks where
+    the cacher stores the NEXT active week's games early).
     """
-    from datetime import date
+    from datetime import date, timedelta
     from apex10.db import get_client
 
     db = get_client()
-    today_str = date.today().isoformat()
-    
-    # 1. Pull the cached schedule from Supabase
+    today = date.today()
+    today_str = today.isoformat()
+    # Upper bound: only look 8 days ahead — keeps us strictly within the current week's round
+    window_end_str = (today + timedelta(days=8)).isoformat()
+
+    # 1. Pull the cached schedule — bounded to current week only
     try:
-        response = db.table("weekly_schedule").select("*").gte("match_date", today_str).execute()
+        response = (
+            db.table("weekly_schedule")
+            .select("*")
+            .gte("match_date", today_str)
+            .lte("match_date", window_end_str)
+            .execute()
+        )
         cached_matches = response.data or []
     except Exception as e:
         logger.error(f"Failed to fetch weekly_schedule from Supabase: {e}")
         return []
 
     if not cached_matches:
-        logger.warning("No matches found in the weekly_schedule cache. Has fetch_schedule.py run?")
+        logger.warning(
+            f"No matches found in weekly_schedule for window {today_str} → {window_end_str}. "
+            "If this is an international break week, that is expected."
+        )
         return []
 
-    # 2. Filter out matches that have kicked off
+    # 2. Filter out matches that have already kicked off
     valid_fixtures = []
     for row in cached_matches:
-        # Check kickoff
         d_str = row.get("match_date")
         t_str = row.get("match_time", "")
         if d_str and _has_kicked_off(d_str, t_str):
             continue
-            
+
         valid_fixtures.append({
             "id": row["fixture_id"],
             "league": row["league"],
@@ -381,7 +393,10 @@ def fetch_upcoming_fixtures() -> list[dict]:
             "time": t_str
         })
 
-    logger.info(f"Loaded {len(valid_fixtures)} un-kicked-off fixtures from Supabase cache.")
+    logger.info(
+        f"Loaded {len(valid_fixtures)} fixtures from cache "
+        f"(window: {today_str} → {window_end_str})"
+    )
     return valid_fixtures
 
 

@@ -196,17 +196,19 @@ def fetch_live_odds(leagues: list[str] | None = None) -> dict[str, dict]:
 
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
-                logger.error(f"Odds API: Invalid or Exhausted API key (401)")
+                logger.error("Odds API: Invalid or exhausted API key (401) — skipping remaining leagues")
                 from apex10.live import notify
                 notify.api_exhausted("Odds")
+                break  # All leagues will fail with same key — no point continuing
             elif e.response.status_code == 422:
-                logger.warning(f"Odds API: {league} not in season")
+                logger.warning(f"Odds API: {league} not in season (422) — skipping")
             elif e.response.status_code == 429:
-                logger.error(f"Odds API: Rate limited or exhausted (429)")
+                logger.error("Odds API: Rate limited or monthly quota exhausted (429) — skipping remaining leagues")
                 from apex10.live import notify
                 notify.api_exhausted("Odds")
+                break  # Quota is global — no point trying other leagues
             else:
-                logger.error(f"Odds API error for {league}: {e}")
+                logger.error(f"Odds API error for {league}: {e.response.status_code}")
         except Exception as e:
             logger.error(f"Odds API fetch failed for {league}: {e}")
 

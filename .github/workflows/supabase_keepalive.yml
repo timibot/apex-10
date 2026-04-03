@@ -1,0 +1,30 @@
+name: Supabase Keep-Alive
+
+on:
+  # Run every 3 days at 08:00 UTC — well within Supabase's 7-day pause threshold
+  schedule:
+    - cron: "0 8 */3 * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    name: ping-supabase
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Ping Supabase to prevent project pause
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          echo "Pinging Supabase at $SUPABASE_URL ..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "apikey: $SUPABASE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_KEY" \
+            "$SUPABASE_URL/rest/v1/")
+          echo "Response status: $STATUS"
+          if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 500 ]; then
+            echo "✅ Supabase is alive (HTTP $STATUS)"
+          else
+            echo "⚠️ Unexpected status: $STATUS"
+            exit 1
+          fi

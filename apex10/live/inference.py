@@ -356,16 +356,16 @@ def fetch_upcoming_fixtures() -> list[dict]:
 
     # 1. Pull the cached schedule — bounded to current week only
     try:
-        response = (
+        response = _supabase_retry(lambda: (
             db.table("weekly_schedule")
             .select("*")
             .gte("match_date", today_str)
             .lte("match_date", window_end_str)
             .execute()
-        )
+        ), retries=3, delay=8.0)
         cached_matches = response.data or []
     except Exception as e:
-        logger.error(f"Failed to fetch weekly_schedule from Supabase: {e}")
+        logger.error(f"Failed to fetch weekly_schedule from Supabase after retries: {e}")
         return []
 
     if not cached_matches:
@@ -966,10 +966,25 @@ def _find_best_bet(
 
 
 
+def _supabase_retry(fn, retries: int = 3, delay: float = 5.0):
+    """Call fn() with simple retry logic for transient Supabase/DNS failures."""
+    import time
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            logger.warning(f"Supabase call failed (attempt {attempt}/{retries}): {e}")
+            if attempt < retries:
+                time.sleep(delay)
+    raise last_exc
+
+
 def run_inference() -> dict:
     """
     Full inference pipeline:
-    1. Fetch upcoming fixtures from TheSportsDB (all leagues)
+    1. Fetch upcoming fixtures from Supabase weekly_schedule cache
     2. Group by league, load per-league models
     3. Score each fixture with its league's model pair
     4. Write to upcoming_fixtures table
@@ -987,11 +1002,18 @@ def run_inference() -> dict:
     live_odds = fetch_live_odds()
 
     # Fetch existing fixtures to preserve opening odds for movement tracking
-    existing_fixtures_resp = db.table("upcoming_fixtures").select("api_match_id, opening_odds").execute()
-    existing_opening_odds = {
-        row["api_match_id"]: row["opening_odds"] 
-        for row in (existing_fixtures_resp.data or [])
-    }
+    # Non-critical: if Supabase is transiently unreachable, skip gracefully
+    try:
+        existing_fixtures_resp = _supabase_retry(
+            lambda: db.table("upcoming_fixtures").select("api_match_id, opening_odds").execute()
+        )
+        existing_opening_odds = {
+            row["api_match_id"]: row["opening_odds"]
+            for row in (existing_fixtures_resp.data or [])
+        }
+    except Exception as e:
+        logger.warning(f"Could not fetch existing opening odds (non-fatal): {e}")
+        existing_opening_odds = {}
 
     with CacheRunLogger(db) as cache_log:
         # Fetch upcoming fixtures from TheSportsDB

@@ -88,7 +88,7 @@ def _fetch_league_from_odds_api(
             "match_time": match_time + " UTC",
             "home_team": home,
             "away_team": away,
-            "round": "Unknown",
+            "round": 0,
             "status": "Upcoming",
         })
 

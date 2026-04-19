@@ -1,8 +1,8 @@
-name: APEX-10 Tuesday Settlement
+name: APEX-10 Thursday Settlement
 
 on:
   schedule:
-    - cron: '0 8 * * 2'   # Every Tuesday at 08:00 UTC
+    - cron: '0 8 * * 4'   # Every Thursday at 08:00 UTC
   workflow_dispatch:        # Manual trigger button
 
 jobs:

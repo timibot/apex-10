@@ -1,19 +1,21 @@
 """
 settlement.py
 -------------
-Runs on Monday mornings (post-weekend fixtures) to:
-  1. Fetch final match results from the API
-  2. Resolve each ungraded paper_trade_leg to actual_outcome
-  3. Compute brier_contribution per leg
-  4. Update the DB row in-place
-  5. Emit a weekly calibration summary to diagnostics/
+Runs on Tuesdays at 08:00 UTC to grade last weekend's predictions.
 
-Cron: 0 7 * * 1  (Monday 07:00 UTC, before cache.py runs at 08:00)
+For each row in `upcoming_fixtures` where:
+  - match_date < today  (game has passed)
+  - actual_outcome IS NULL  (not yet graded)
+
+It fetches the final score from API-Football, resolves the bet outcome,
+computes the Brier contribution, and writes results back to the table.
+
+Also emits a running performance report to Discord.
 """
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -21,54 +23,48 @@ import httpx
 from apex10.live import notify
 
 # ---------------------------------------------------------------------------
-# Outcome resolution
+# Market outcome resolvers
 # ---------------------------------------------------------------------------
 
 MARKET_RESOLVERS = {
-    "Home Win":           lambda r: 1.0 if r["home_goals"] > r["away_goals"] else 0.0,
-    "Away Win":           lambda r: 1.0 if r["away_goals"] > r["home_goals"] else 0.0,
-    "Double Chance 1X":   lambda r: 1.0 if r["home_goals"] >= r["away_goals"] else 0.0,
-    "Double Chance X2":   lambda r: 1.0 if r["away_goals"] >= r["home_goals"] else 0.0,
-    "Draw No Bet":        lambda r: 1.0 if r["home_goals"] > r["away_goals"] else (0.5 if r["home_goals"] == r["away_goals"] else 0.0),
-    "DNB Away":           lambda r: 1.0 if r["away_goals"] > r["home_goals"] else (0.5 if r["home_goals"] == r["away_goals"] else 0.0),
-    "Over 1.5 Goals":     lambda r: 1.0 if (r["home_goals"] + r["away_goals"]) >= 2 else 0.0,
-    "Over 2.5 Goals":     lambda r: 1.0 if (r["home_goals"] + r["away_goals"]) >= 3 else 0.0,
-    "Under 3.5 Goals":    lambda r: 1.0 if (r["home_goals"] + r["away_goals"]) <= 3 else 0.0,
-    "BTTS Yes":           lambda r: 1.0 if r["home_goals"] >= 1 and r["away_goals"] >= 1 else 0.0,
-    "BTTS No":            lambda r: 1.0 if r["home_goals"] == 0 or r["away_goals"] == 0 else 0.0,
+    "Home Win":          lambda r: 1.0 if r["home_goals"] > r["away_goals"] else 0.0,
+    "Away Win":          lambda r: 1.0 if r["away_goals"] > r["home_goals"] else 0.0,
+    "Double Chance 1X":  lambda r: 1.0 if r["home_goals"] >= r["away_goals"] else 0.0,
+    "Double Chance X2":  lambda r: 1.0 if r["away_goals"] >= r["home_goals"] else 0.0,
+    "Draw No Bet":       lambda r: 1.0 if r["home_goals"] > r["away_goals"] else (0.5 if r["home_goals"] == r["away_goals"] else 0.0),
+    "DNB Away":          lambda r: 1.0 if r["away_goals"] > r["home_goals"] else (0.5 if r["home_goals"] == r["away_goals"] else 0.0),
+    "Over 1.5 Goals":    lambda r: 1.0 if (r["home_goals"] + r["away_goals"]) >= 2 else 0.0,
+    "Over 2.5 Goals":    lambda r: 1.0 if (r["home_goals"] + r["away_goals"]) >= 3 else 0.0,
+    "Under 3.5 Goals":   lambda r: 1.0 if (r["home_goals"] + r["away_goals"]) <= 3 else 0.0,
+    "BTTS Yes":          lambda r: 1.0 if r["home_goals"] >= 1 and r["away_goals"] >= 1 else 0.0,
+    "BTTS No":           lambda r: 1.0 if r["home_goals"] == 0 or r["away_goals"] == 0 else 0.0,
 }
+
 
 def resolve_outcome(market: str, result: Dict[str, Any]) -> Optional[float]:
     """
-    Returns 1.0 (win), 0.0 (loss), 0.5 (push / match void), or None if
-    the market is unrecognised or the result is unavailable.
+    Returns 1.0 (win), 0.0 (loss), 0.5 (push/void), or None
+    if the market is unknown or the match hasn't finished.
     """
     if result.get("status") != "FINISHED":
-        return None  # Postponed / abandoned — leave NULL, retry next cycle
-
+        return None
     resolver = MARKET_RESOLVERS.get(market)
     if resolver is None:
-        print(f"⚠️  Unknown market '{market}' — cannot resolve.")
+        print(f"⚠️  Unknown market '{market}' — skipping.")
         return None
-
     return resolver(result)
 
+
 def brier_contribution(predicted_prob: float, actual_outcome: float) -> float:
-    """
-    Single-observation Brier score component: (p - o)^2
-    Lower is better. Range [0, 1].
-    """
     return round((predicted_prob - actual_outcome) ** 2, 6)
 
+
 # ---------------------------------------------------------------------------
-# API helpers
+# API-Football result fetch
 # ---------------------------------------------------------------------------
 
-def fetch_result(fixture_id: str, api_key: str) -> Optional[Dict[str, Any]]:
-    """
-    Fetches the final score for a fixture from the configured results API.
-    Replace the URL/params with your actual provider (API-Football, Opta, etc.)
-    """
+def fetch_result(fixture_id: int, api_key: str) -> Optional[Dict[str, Any]]:
+    """Fetch the final score for a fixture from API-Football."""
     url = "https://v3.football.api-sports.io/fixtures"
     headers = {"x-apisports-key": api_key}
     params = {"id": fixture_id}
@@ -79,8 +75,11 @@ def fetch_result(fixture_id: str, api_key: str) -> Optional[Dict[str, Any]]:
             resp.raise_for_status()
             data = resp.json()
 
+        if not data.get("response"):
+            return {"status": "NOT_FOUND"}
+
         fixture = data["response"][0]
-        status = fixture["fixture"]["status"]["short"]  # "FT", "PST", "CANC" etc.
+        status = fixture["fixture"]["status"]["short"]  # "FT", "PST", "CANC", etc.
 
         if status not in ("FT", "AET", "PEN"):
             return {"status": "NOT_FINISHED"}
@@ -94,157 +93,145 @@ def fetch_result(fixture_id: str, api_key: str) -> Optional[Dict[str, Any]]:
         print(f"⚠️  API error fetching fixture {fixture_id}: {e}")
         return None
 
+
 # ---------------------------------------------------------------------------
 # Main settlement loop
 # ---------------------------------------------------------------------------
 
-def settle_pending_legs(db_client: Any, api_key: str) -> Dict[str, Any]:
+def settle_pending(db_client: Any, api_key: str) -> Dict[str, Any]:
     """
-    Queries all ungraded legs (actual_outcome IS NULL), resolves each one,
-    and updates the DB. Returns a settlement summary dict.
+    Find all upcoming_fixtures from past match dates that haven't been graded,
+    fetch results, resolve outcomes, and write back to the database.
     """
+    today_str = date.today().isoformat()
+
     response = (
-        db_client.table("paper_trade_legs")
-        .select("*")
-        .is_("actual_outcome", "null")
+        db_client.table("upcoming_fixtures")
+        .select("id, api_match_id, league, home_team, away_team, match_date, best_bet_type, consensus_prob")
+        .lt("match_date", today_str)       # Game has passed
+        .is_("actual_outcome", "null")     # Not yet graded
         .execute()
     )
     pending: List[Dict[str, Any]] = response.data or []
 
     if not pending:
-        print("✅  No pending legs to settle.")
-        return {"settled": 0, "skipped": 0, "errors": 0}
+        print("✅  No pending fixtures to settle.")
+        return {"settled": 0, "skipped": 0, "errors": 0, "total": 0}
 
+    print(f"📋  Found {len(pending)} ungraded fixtures to settle...")
     settled = skipped = errors = 0
 
-    for leg in pending:
-        fixture_id = leg["fixture_id"]
+    for fix in pending:
+        fixture_id = fix["api_match_id"]
         result = fetch_result(fixture_id, api_key)
 
         if result is None:
             errors += 1
             continue
 
-        outcome = resolve_outcome(leg["market"], result)
+        outcome = resolve_outcome(fix["best_bet_type"], result)
 
         if outcome is None:
-            # Match not finished or unknown market — retry next run
             skipped += 1
             continue
 
-        # consensus_prob is what we hold the model accountable to
-        consensus = leg["consensus_prob"]
-        brier = brier_contribution(consensus, outcome)
+        brier = brier_contribution(float(fix["consensus_prob"]), outcome)
+        outcome_label = "WIN" if outcome == 1.0 else ("PUSH" if outcome == 0.5 else "LOSS")
+        print(f"  {'✅' if outcome == 1.0 else '❌'} {fix['home_team']} vs {fix['away_team']} "
+              f"[{fix['best_bet_type']}] → {outcome_label} | brier={brier}")
 
         try:
-            db_client.table("paper_trade_legs").update({
-                "actual_outcome": outcome,
+            db_client.table("upcoming_fixtures").update({
+                "actual_outcome":     outcome,
                 "brier_contribution": brier,
-                "settled_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", leg["id"]).execute()
+                "settled_at":         datetime.now(timezone.utc).isoformat(),
+            }).eq("id", fix["id"]).execute()
             settled += 1
         except Exception as e:
-            print(f"⚠️  DB update failed for leg {leg['id']}: {e}")
+            print(f"⚠️  DB update failed for id {fix['id']}: {e}")
             errors += 1
 
-    summary = {
-        "run_at": datetime.now(timezone.utc).isoformat(),
-        "total_pending": len(pending),
-        "settled": settled,
-        "skipped": skipped,
-        "errors": errors,
-    }
-    print(f"📋  Settlement complete: {summary}")
-    return summary
+    print(f"\n📊  Settlement: {settled} settled, {skipped} skipped (not finished), {errors} errors")
+    return {"settled": settled, "skipped": skipped, "errors": errors, "total": len(pending)}
+
 
 # ---------------------------------------------------------------------------
-# Calibration diagnostics
+# Calibration report
 # ---------------------------------------------------------------------------
 
-def emit_calibration_report(db_client: Any, run_id: str) -> None:
+def emit_calibration_report(db_client: Any, run_id: str) -> Dict:
     """
-    Reads all settled legs and emits a calibration summary JSON.
-    Groups by model (lgbm / xgb / consensus) and computes:
-      - Mean Brier score
-      - Reliability bins (predicted prob bucket → actual win rate)
-    This is the data you need to plot the reliability diagram.
+    Reads all settled rows from upcoming_fixtures and computes:
+    - Win rate per league
+    - Win rate per market/bet type
+    - Overall ROI (paper trade)
+    - Brier score
     """
     response = (
-        db_client.table("paper_trade_legs")
-        .select("p_lgbm, p_xgb, consensus_prob, actual_outcome, league, market")
+        db_client.table("upcoming_fixtures")
+        .select("league, best_bet_type, best_bet_odds, consensus_prob, actual_outcome, brier_contribution")
         .not_.is_("actual_outcome", "null")
         .execute()
     )
-    legs: List[Dict[str, Any]] = response.data or []
+    rows: List[Dict[str, Any]] = response.data or []
 
-    if not legs:
-        print("⚠️  No settled legs yet — calibration report skipped.")
-        return
+    if not rows:
+        print("⚠️  No settled rows yet — calibration skipped.")
+        return {}
 
-    # Per-model Brier scores
-    def mean_brier(probs, outcomes):
-        return round(sum((p - o) ** 2 for p, o in zip(probs, outcomes)) / len(outcomes), 6)
+    total = len(rows)
+    wins = sum(1 for r in rows if float(r["actual_outcome"]) == 1.0)
+    briers = [float(r["brier_contribution"]) for r in rows if r["brier_contribution"] is not None]
+    avg_brier = round(sum(briers) / len(briers), 6) if briers else 0.0
 
-    outcomes   = [float(l["actual_outcome"]) for l in legs]
-    lgbm_probs = [float(l["p_lgbm"])         for l in legs]
-    xgb_probs  = [float(l["p_xgb"])          for l in legs]
-    cons_probs = [float(l["consensus_prob"]) for l in legs]
+    # ROI calculation: sum(odds * outcome - 1) / n
+    roi_sum = sum((float(r["best_bet_odds"]) * float(r["actual_outcome"])) - 1.0 for r in rows)
+    roi_pct = round((roi_sum / total) * 100, 2)
 
-    # Reliability bins — 10 buckets [0.0–0.1), [0.1–0.2), …, [0.9–1.0]
-    def reliability_bins(probs, outcomes, n_bins=10):
-        bins = {i: {"count": 0, "sum_probs": 0.0, "sum_outcomes": 0.0}
-                for i in range(n_bins)}
-        for p, o in zip(probs, outcomes):
-            bucket = min(int(p * n_bins), n_bins - 1)
-            bins[bucket]["count"] += 1
-            bins[bucket]["sum_probs"] += p
-            bins[bucket]["sum_outcomes"] += o
+    # By league
+    by_league: Dict[str, dict] = {}
+    for r in rows:
+        lg = r["league"]
+        if lg not in by_league:
+            by_league[lg] = {"total": 0, "wins": 0, "roi": 0.0}
+        by_league[lg]["total"] += 1
+        outcome = float(r["actual_outcome"])
+        odds = float(r["best_bet_odds"])
+        by_league[lg]["wins"] += 1 if outcome == 1.0 else 0
+        by_league[lg]["roi"] += (odds * outcome) - 1.0
 
-        result = {}
-        for i, b in bins.items():
-            if b["count"] == 0:
-                continue
-            lower = round(i / n_bins, 1)
-            upper = round((i + 1) / n_bins, 1)
-            label = f"{lower:.1f}-{upper:.1f}"
-            result[label] = {
-                "n":              b["count"],
-                "mean_predicted": round(b["sum_probs"]    / b["count"], 4),
-                "actual_win_rate": round(b["sum_outcomes"] / b["count"], 4),
-            }
-        return result
-
-    # Per-league breakdown
-    league_brier: Dict[str, list] = {}
-    for leg in legs:
-        lg = leg["league"]
-        if lg not in league_brier:
-            league_brier[lg] = []
-        league_brier[lg].append((float(leg["consensus_prob"]), float(leg["actual_outcome"])))
-
-    league_summary = {
-        lg: {
-            "n": len(pairs),
-            "brier": round(sum((p - o) ** 2 for p, o in pairs) / len(pairs), 6),
-        }
-        for lg, pairs in league_brier.items()
-    }
+    # By market
+    by_market: Dict[str, dict] = {}
+    for r in rows:
+        mk = r["best_bet_type"]
+        if mk not in by_market:
+            by_market[mk] = {"total": 0, "wins": 0}
+        by_market[mk]["total"] += 1
+        if float(r["actual_outcome"]) == 1.0:
+            by_market[mk]["wins"] += 1
 
     report = {
         "run_id":    run_id,
         "generated": datetime.now(timezone.utc).isoformat(),
-        "n_legs":    len(legs),
-        "brier_scores": {
-            "lgbm":      mean_brier(lgbm_probs, outcomes),
-            "xgb":       mean_brier(xgb_probs,  outcomes),
-            "consensus": mean_brier(cons_probs,  outcomes),
+        "total_settled": total,
+        "win_rate":  round(wins / total, 4),
+        "avg_brier": avg_brier,
+        "roi_pct":   roi_pct,
+        "by_league": {
+            lg: {
+                "n":        v["total"],
+                "win_rate": round(v["wins"] / v["total"], 3),
+                "roi_pct":  round((v["roi"] / v["total"]) * 100, 2),
+            }
+            for lg, v in by_league.items()
         },
-        "reliability_bins": {
-            "lgbm":      reliability_bins(lgbm_probs, outcomes),
-            "xgb":       reliability_bins(xgb_probs,  outcomes),
-            "consensus": reliability_bins(cons_probs,  outcomes),
+        "by_market": {
+            mk: {
+                "n":        v["total"],
+                "win_rate": round(v["wins"] / v["total"], 3),
+            }
+            for mk, v in by_market.items()
         },
-        "by_league": league_summary,
     }
 
     os.makedirs("apex10/diagnostics", exist_ok=True)
@@ -252,10 +239,47 @@ def emit_calibration_report(db_client: Any, run_id: str) -> None:
     with open(filepath, "w") as f:
         json.dump(report, f, indent=4)
 
-    print(f"📊  Calibration report written to {filepath}")
-    print(f"    Brier → LightGBM: {report['brier_scores']['lgbm']} | "
-          f"XGBoost: {report['brier_scores']['xgb']} | "
-          f"Consensus: {report['brier_scores']['consensus']}")
+    print(f"\n📊  Calibration: {total} settled | Win rate: {report['win_rate']:.1%} | ROI: {roi_pct:+.1f}% | Brier: {avg_brier}")
+    for lg, v in report["by_league"].items():
+        print(f"    {lg}: {v['n']} bets | {v['win_rate']:.1%} win | ROI {v['roi_pct']:+.1f}%")
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Discord performance summary
+# ---------------------------------------------------------------------------
+
+def _discord_report(report: Dict, settlement: Dict) -> None:
+    if not report:
+        notify._send("ℹ️ **APEX-10 Settlement** — No settled results yet.")
+        return
+
+    settled = settlement.get("settled", 0)
+    total = report.get("total_settled", 0)
+    win_rate = report.get("win_rate", 0)
+    roi = report.get("roi_pct", 0)
+    brier = report.get("avg_brier", 0)
+
+    lines = [
+        f"📊 **APEX-10 Weekly Performance Report**",
+        f"",
+        f"🎯 Win Rate: **{win_rate:.1%}** ({int(win_rate * total)}/{total} bets)",
+        f"💰 Paper ROI: **{roi:+.1f}%**",
+        f"📐 Brier Score: **{brier}** _(lower = better, perfect = 0)_",
+        f"",
+        f"**By League:**",
+    ]
+    for lg, v in report.get("by_league", {}).items():
+        lines.append(f"  {lg}: {v['win_rate']:.1%} win | ROI {v['roi_pct']:+.1f}% ({v['n']} bets)")
+    lines.append("")
+    lines.append(f"**By Market:**")
+    for mk, v in sorted(report.get("by_market", {}).items(), key=lambda x: -x[1]["win_rate"]):
+        lines.append(f"  {mk}: {v['win_rate']:.1%} ({v['n']} bets)")
+    lines.append("")
+    lines.append(f"_This week: {settled} new results graded_")
+
+    notify._send("\n".join(lines))
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -267,44 +291,15 @@ def run(db_client: Any, api_key: str) -> None:
     print(f"  APEX-10 Settlement — {run_id}")
     print(f"{'='*60}\n")
 
-    settlement_result = settle_pending_legs(db_client, api_key)
-    emit_calibration_report(db_client, run_id)
+    settlement_result = settle_pending(db_client, api_key)
+    report = emit_calibration_report(db_client, run_id)
+    _discord_report(report, settlement_result)
 
-    # ── Discord notification ──────────────────────────────────────────
-    settled = settlement_result.get("settled", 0)
-    skipped = settlement_result.get("skipped", 0)
-    errors = settlement_result.get("errors", 0)
-    total = settlement_result.get("total_pending", 0)
-
-    if total > 0:
-        # Compute overall Brier from settled legs
-        try:
-            resp = (
-                db_client.table("paper_trade_legs")
-                .select("brier_contribution")
-                .not_.is_("brier_contribution", "null")
-                .execute()
-            )
-            briers = [float(r["brier_contribution"]) for r in (resp.data or [])]
-            avg_brier = sum(briers) / len(briers) if briers else 0.0
-        except Exception:
-            avg_brier = 0.0
-
-        result_str = f"{settled} settled, {skipped} skipped, {errors} errors"
-        notify.result_logged(
-            week=run_id,
-            result=result_str,
-            new_bank=0.0,  # paper trading
-            brier=round(avg_brier, 4),
-        )
-    else:
-        notify._send("ℹ️ **APEX-10 Settlement** — No pending legs to settle this week.")
 
 if __name__ == "__main__":
     from apex10.db import get_client
     from apex10.config import get_api_config
 
     _db = get_client()
-    _api_key = get_api_config().API_FOOTBALL_KEY
-
-    run(_db, _api_key)
+    _cfg = get_api_config()
+    run(_db, _cfg.API_FOOTBALL_KEY)

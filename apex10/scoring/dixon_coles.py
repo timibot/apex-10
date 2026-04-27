@@ -120,7 +120,7 @@ def derive_probabilities(
     dc_x2 = away_win + draw  # Away win or draw
 
     # ── Team to Score 1+ ─────────────────────────────────────────────────
-    home_scores = 1.0 - float(np.sum(m[:, 0]))  # P(home goals > 0)
+    home_scores = 1.0 - float(np.sum(m[0, :]))  # P(home goals > 0)
 
     # ── DNB Away ───────────────────────────────────────────────────────────
     dnb_away_prob = (

@@ -103,7 +103,7 @@ def _normalise_sportsdb_team(name: str) -> str:
 # ── Stub defaults for features we don't have live data for yet ──────────────
 STUB_DEFAULTS = {
     "ppda_home": 10.0, "ppda_away": 10.0, "ppda_delta": 0.0,
-    "home_advantage": 1.0,
+    "home_advantage": 0.5,
     "h2h_win_rate_home": 0.5,
     "injury_count_home": 0, "injury_count_away": 0,
     "key_player_absent_home": 0, "key_player_absent_away": 0,
@@ -1068,8 +1068,10 @@ def run_inference() -> dict:
                     home_goals_scored = features.get("goals_scored_avg_home", 1.3)
                     away_goals_conceded = features.get("goals_conceded_avg_away", 1.3)
 
-                    # Fixture-specific lambda: home attacking strength vs away defensive weakness
-                    mu = (home_xg_for + away_xg_against + home_goals_scored) / 3.0
+                    # Fixture-specific lambda: symmetric attack vs defence model
+                    # mu = how many home scores = (home attack + away defence weakness) / 2
+                    # nu = how many away scores = (away attack + home defence weakness) / 2
+                    mu = (home_xg_for + away_xg_against) / 2.0
                     nu = (away_xg_for + home_xg_against) / 2.0
 
                     dc_probs = derive_probabilities(mu, nu, league_rho)

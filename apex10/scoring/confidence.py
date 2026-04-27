@@ -429,7 +429,7 @@ def pick_best_bet(
     match_odds: dict | None,
     elo_diff: float = 0.0,
     min_votes: int = 3,
-    odds_range: tuple[float, float] = (1.10, 1.50),
+    odds_range: tuple[float, float] = (ODDS_MIN, ODDS_MAX),
 ) -> MarketPick | None:
     """
     Pick the single best bet for a fixture.

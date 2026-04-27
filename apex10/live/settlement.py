@@ -347,5 +347,20 @@ def run(db_client: Any) -> None:
 
 
 if __name__ == "__main__":
-    from apex10.db import get_client
-    run(get_client())
+    import logging
+    import traceback
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    )
+    try:
+        from apex10.db import get_client
+        _db = get_client()
+        run(_db)
+    except Exception as _exc:
+        print("\n" + "=" * 60)
+        print("SETTLEMENT CRASHED — full traceback:")
+        print("=" * 60)
+        traceback.print_exc()
+        print("=" * 60)
+        raise  # still exit non-zero so GitHub Actions marks it failed

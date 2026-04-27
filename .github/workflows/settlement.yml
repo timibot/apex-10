@@ -8,7 +8,7 @@ on:
 jobs:
   settlement:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30   # 226 rows × 1.5s TheSportsDB delay ≈ ~6 min
 
     steps:
       - name: Checkout code
@@ -29,9 +29,6 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
           APEX_ENV: production
         run: python -m apex10.live.settlement

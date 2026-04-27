@@ -1,20 +1,22 @@
 """
 settlement.py
 -------------
-Runs on Tuesdays at 08:00 UTC to grade last weekend's predictions.
+Runs every Thursday at 08:00 UTC to grade last weekend's predictions.
 
 For each row in `upcoming_fixtures` where:
   - match_date < today  (game has passed)
   - actual_outcome IS NULL  (not yet graded)
 
-It fetches the final score from API-Football, resolves the bet outcome,
-computes the Brier contribution, and writes results back to the table.
+It fetches the final score from TheSportsDB using the stored api_match_id
+(which IS a TheSportsDB event ID), resolves the bet outcome, computes the
+Brier contribution, and writes results back to the table.
 
 Also emits a running performance report to Discord.
 """
 
 import json
 import os
+import time
 from datetime import datetime, date, timezone
 from typing import Any, Dict, List, Optional
 
@@ -42,10 +44,6 @@ MARKET_RESOLVERS = {
 
 
 def resolve_outcome(market: str, result: Dict[str, Any]) -> Optional[float]:
-    """
-    Returns 1.0 (win), 0.0 (loss), 0.5 (push/void), or None
-    if the market is unknown or the match hasn't finished.
-    """
     if result.get("status") != "FINISHED":
         return None
     resolver = MARKET_RESOLVERS.get(market)
@@ -60,56 +58,81 @@ def brier_contribution(predicted_prob: float, actual_outcome: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# API-Football result fetch
+# TheSportsDB result fetch  (api_match_id IS a TheSportsDB event ID)
 # ---------------------------------------------------------------------------
 
-def fetch_result(fixture_id: int, api_key: str) -> Optional[Dict[str, Any]]:
-    """Fetch the final score for a fixture from API-Football."""
-    url = "https://v3.football.api-sports.io/fixtures"
-    headers = {"x-apisports-key": api_key}
-    params = {"id": fixture_id}
+def fetch_result(event_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Fetch the final score for a TheSportsDB event.
+    TheSportsDB free tier — no API key required.
+    Returns dict with status FINISHED/NOT_FINISHED/NOT_FOUND, and goals if finished.
+    """
+    url = f"https://www.thesportsdb.com/api/v1/json/3/lookupevent.php?id={event_id}"
 
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.get(url, headers=headers, params=params)
+    for attempt in range(3):
+        try:
+            time.sleep(1.5)          # respect free-tier rate limit
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.get(url)
+
+            if resp.status_code == 429:
+                wait = 5.0 * (attempt + 1)
+                print(f"  ⏳ Rate limited — waiting {wait}s...")
+                time.sleep(wait)
+                continue
+
             resp.raise_for_status()
             data = resp.json()
 
-        if not data.get("response"):
-            return {"status": "NOT_FOUND"}
+            events = data.get("events")
+            if not events or events[0] is None:
+                return {"status": "NOT_FOUND"}
 
-        fixture = data["response"][0]
-        status = fixture["fixture"]["status"]["short"]  # "FT", "PST", "CANC", etc.
+            event = events[0]
 
-        if status not in ("FT", "AET", "PEN"):
+            # TheSportsDB marks finished matches with strStatus == "Match Finished"
+            # and populates intHomeScore / intAwayScore
+            status = event.get("strStatus", "")
+            home_score = event.get("intHomeScore")
+            away_score = event.get("intAwayScore")
+
+            if status == "Match Finished" and home_score is not None and away_score is not None:
+                return {
+                    "status": "FINISHED",
+                    "home_goals": int(home_score),
+                    "away_goals": int(away_score),
+                }
+
+            # Postponed / cancelled
+            if status in ("Postponed", "Cancelled", "Abandoned"):
+                return {"status": status.upper()}
+
+            # Not yet played or live
             return {"status": "NOT_FINISHED"}
 
-        return {
-            "status": "FINISHED",
-            "home_goals": fixture["goals"]["home"],
-            "away_goals": fixture["goals"]["away"],
-        }
-    except Exception as e:
-        print(f"⚠️  API error fetching fixture {fixture_id}: {e}")
-        return None
+        except Exception as e:
+            print(f"  ⚠️  Error fetching event {event_id} (attempt {attempt+1}): {e}")
+            time.sleep(3.0)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
 # Main settlement loop
 # ---------------------------------------------------------------------------
 
-def settle_pending(db_client: Any, api_key: str) -> Dict[str, Any]:
+def settle_pending(db_client: Any) -> Dict[str, Any]:
     """
     Find all upcoming_fixtures from past match dates that haven't been graded,
-    fetch results, resolve outcomes, and write back to the database.
+    fetch results from TheSportsDB, and write outcomes back.
     """
     today_str = date.today().isoformat()
 
     response = (
         db_client.table("upcoming_fixtures")
         .select("id, api_match_id, league, home_team, away_team, match_date, best_bet_type, consensus_prob")
-        .lt("match_date", today_str)       # Game has passed
-        .is_("actual_outcome", "null")     # Not yet graded
+        .lt("match_date", today_str)
+        .is_("actual_outcome", "null")
         .execute()
     )
     pending: List[Dict[str, Any]] = response.data or []
@@ -122,23 +145,48 @@ def settle_pending(db_client: Any, api_key: str) -> Dict[str, Any]:
     settled = skipped = errors = 0
 
     for fix in pending:
-        fixture_id = fix["api_match_id"]
-        result = fetch_result(fixture_id, api_key)
+        event_id = fix["api_match_id"]
+        result = fetch_result(event_id)
 
         if result is None:
+            print(f"  ❓ {fix['home_team']} vs {fix['away_team']} — fetch failed entirely")
             errors += 1
+            continue
+
+        if result["status"] == "NOT_FOUND":
+            # Event ID not in TheSportsDB — permanent skip, mark as void
+            print(f"  🚫 {fix['home_team']} vs {fix['away_team']} (ID {event_id}) — not found in TheSportsDB, voiding")
+            try:
+                db_client.table("upcoming_fixtures").update({
+                    "actual_outcome":     0.5,    # void/push
+                    "brier_contribution": 0.0,
+                    "settled_at":         datetime.now(timezone.utc).isoformat(),
+                }).eq("id", fix["id"]).execute()
+                settled += 1
+            except Exception as e:
+                print(f"    DB update failed: {e}")
+                errors += 1
+            continue
+
+        if result["status"] != "FINISHED":
+            print(f"  ⏭️  {fix['home_team']} vs {fix['away_team']} — {result['status']}, skipping")
+            skipped += 1
             continue
 
         outcome = resolve_outcome(fix["best_bet_type"], result)
 
         if outcome is None:
+            print(f"  ⚠️  {fix['home_team']} vs {fix['away_team']} — unknown market '{fix['best_bet_type']}'")
             skipped += 1
             continue
 
         brier = brier_contribution(float(fix["consensus_prob"]), outcome)
-        outcome_label = "WIN" if outcome == 1.0 else ("PUSH" if outcome == 0.5 else "LOSS")
-        print(f"  {'✅' if outcome == 1.0 else '❌'} {fix['home_team']} vs {fix['away_team']} "
-              f"[{fix['best_bet_type']}] → {outcome_label} | brier={brier}")
+        hg = result["home_goals"]
+        ag = result["away_goals"]
+        label = "WIN ✅" if outcome == 1.0 else ("PUSH ↔️" if outcome == 0.5 else "LOSS ❌")
+
+        print(f"  {label} {fix['home_team']} {hg}-{ag} {fix['away_team']} "
+              f"[{fix['best_bet_type']}] prob={fix['consensus_prob']:.2f} brier={brier:.4f}")
 
         try:
             db_client.table("upcoming_fixtures").update({
@@ -148,10 +196,10 @@ def settle_pending(db_client: Any, api_key: str) -> Dict[str, Any]:
             }).eq("id", fix["id"]).execute()
             settled += 1
         except Exception as e:
-            print(f"⚠️  DB update failed for id {fix['id']}: {e}")
+            print(f"    ⚠️  DB update failed: {e}")
             errors += 1
 
-    print(f"\n📊  Settlement: {settled} settled, {skipped} skipped (not finished), {errors} errors")
+    print(f"\n📊  Settlement done: {settled} settled, {skipped} not finished yet, {errors} errors")
     return {"settled": settled, "skipped": skipped, "errors": errors, "total": len(pending)}
 
 
@@ -160,13 +208,6 @@ def settle_pending(db_client: Any, api_key: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def emit_calibration_report(db_client: Any, run_id: str) -> Dict:
-    """
-    Reads all settled rows from upcoming_fixtures and computes:
-    - Win rate per league
-    - Win rate per market/bet type
-    - Overall ROI (paper trade)
-    - Brier score
-    """
     response = (
         db_client.table("upcoming_fixtures")
         .select("league, best_bet_type, best_bet_odds, consensus_prob, actual_outcome, brier_contribution")
@@ -179,18 +220,23 @@ def emit_calibration_report(db_client: Any, run_id: str) -> Dict:
         print("⚠️  No settled rows yet — calibration skipped.")
         return {}
 
-    total = len(rows)
-    wins = sum(1 for r in rows if float(r["actual_outcome"]) == 1.0)
-    briers = [float(r["brier_contribution"]) for r in rows if r["brier_contribution"] is not None]
+    # Filter out voids (0.5 from NOT_FOUND) for main stats
+    real_rows = [r for r in rows if float(r["actual_outcome"]) != 0.5]
+    total = len(real_rows)
+    if total == 0:
+        print("⚠️  All settled rows are voids.")
+        return {}
+
+    wins = sum(1 for r in real_rows if float(r["actual_outcome"]) == 1.0)
+    briers = [float(r["brier_contribution"]) for r in real_rows if r["brier_contribution"] is not None]
     avg_brier = round(sum(briers) / len(briers), 6) if briers else 0.0
 
-    # ROI calculation: sum(odds * outcome - 1) / n
-    roi_sum = sum((float(r["best_bet_odds"]) * float(r["actual_outcome"])) - 1.0 for r in rows)
+    roi_sum = sum((float(r["best_bet_odds"]) * float(r["actual_outcome"])) - 1.0 for r in real_rows)
     roi_pct = round((roi_sum / total) * 100, 2)
 
     # By league
     by_league: Dict[str, dict] = {}
-    for r in rows:
+    for r in real_rows:
         lg = r["league"]
         if lg not in by_league:
             by_league[lg] = {"total": 0, "wins": 0, "roi": 0.0}
@@ -202,7 +248,7 @@ def emit_calibration_report(db_client: Any, run_id: str) -> Dict:
 
     # By market
     by_market: Dict[str, dict] = {}
-    for r in rows:
+    for r in real_rows:
         mk = r["best_bet_type"]
         if mk not in by_market:
             by_market[mk] = {"total": 0, "wins": 0}
@@ -235,13 +281,16 @@ def emit_calibration_report(db_client: Any, run_id: str) -> Dict:
     }
 
     os.makedirs("apex10/diagnostics", exist_ok=True)
-    filepath = f"apex10/diagnostics/calibration_{run_id}.json"
-    with open(filepath, "w") as f:
+    with open(f"apex10/diagnostics/calibration_{run_id}.json", "w") as f:
         json.dump(report, f, indent=4)
 
-    print(f"\n📊  Calibration: {total} settled | Win rate: {report['win_rate']:.1%} | ROI: {roi_pct:+.1f}% | Brier: {avg_brier}")
-    for lg, v in report["by_league"].items():
+    print(f"\n📊  Calibration: {total} graded | Win rate: {report['win_rate']:.1%} | ROI: {roi_pct:+.1f}% | Brier: {avg_brier}")
+    for lg, v in sorted(report["by_league"].items(), key=lambda x: -x[1]["win_rate"]):
         print(f"    {lg}: {v['n']} bets | {v['win_rate']:.1%} win | ROI {v['roi_pct']:+.1f}%")
+    print()
+    for mk, v in sorted(report["by_market"].items(), key=lambda x: -x[1]["win_rate"]):
+        print(f"    {mk}: {v['n']} bets | {v['win_rate']:.1%} win")
+
     return report
 
 
@@ -251,32 +300,33 @@ def emit_calibration_report(db_client: Any, run_id: str) -> Dict:
 
 def _discord_report(report: Dict, settlement: Dict) -> None:
     if not report:
-        notify._send("ℹ️ **APEX-10 Settlement** — No settled results yet.")
+        newly = settlement.get("settled", 0)
+        notify._send(f"ℹ️ **APEX-10 Settlement** — {newly} results graded this run. No historical data yet for full report.")
         return
 
-    settled = settlement.get("settled", 0)
+    settled_now = settlement.get("settled", 0)
     total = report.get("total_settled", 0)
     win_rate = report.get("win_rate", 0)
     roi = report.get("roi_pct", 0)
     brier = report.get("avg_brier", 0)
 
     lines = [
-        f"📊 **APEX-10 Weekly Performance Report**",
-        f"",
-        f"🎯 Win Rate: **{win_rate:.1%}** ({int(win_rate * total)}/{total} bets)",
+        "📊 **APEX-10 Weekly Performance Report**",
+        "",
+        f"🎯 Win Rate: **{win_rate:.1%}** ({int(win_rate * total)}/{total} bets graded)",
         f"💰 Paper ROI: **{roi:+.1f}%**",
-        f"📐 Brier Score: **{brier}** _(lower = better, perfect = 0)_",
-        f"",
-        f"**By League:**",
+        f"📐 Brier Score: **{brier}** _(0 = perfect, lower is better)_",
+        "",
+        "**By League:**",
     ]
-    for lg, v in report.get("by_league", {}).items():
+    for lg, v in sorted(report.get("by_league", {}).items(), key=lambda x: -x[1]["win_rate"]):
         lines.append(f"  {lg}: {v['win_rate']:.1%} win | ROI {v['roi_pct']:+.1f}% ({v['n']} bets)")
-    lines.append("")
-    lines.append(f"**By Market:**")
-    for mk, v in sorted(report.get("by_market", {}).items(), key=lambda x: -x[1]["win_rate"]):
+
+    lines += ["", "**By Market (worst → best):**"]
+    for mk, v in sorted(report.get("by_market", {}).items(), key=lambda x: x[1]["win_rate"]):
         lines.append(f"  {mk}: {v['win_rate']:.1%} ({v['n']} bets)")
-    lines.append("")
-    lines.append(f"_This week: {settled} new results graded_")
+
+    lines += ["", f"_This run: {settled_now} new results graded_"]
 
     notify._send("\n".join(lines))
 
@@ -285,21 +335,17 @@ def _discord_report(report: Dict, settlement: Dict) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def run(db_client: Any, api_key: str) -> None:
+def run(db_client: Any) -> None:
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
     print(f"\n{'='*60}")
     print(f"  APEX-10 Settlement — {run_id}")
     print(f"{'='*60}\n")
 
-    settlement_result = settle_pending(db_client, api_key)
+    settlement_result = settle_pending(db_client)
     report = emit_calibration_report(db_client, run_id)
     _discord_report(report, settlement_result)
 
 
 if __name__ == "__main__":
     from apex10.db import get_client
-    from apex10.config import get_api_config
-
-    _db = get_client()
-    _cfg = get_api_config()
-    run(_db, _cfg.API_FOOTBALL_KEY)
+    run(get_client())

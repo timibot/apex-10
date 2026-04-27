@@ -68,11 +68,11 @@ class LeagueConfig:
 
 @dataclass(frozen=True)
 class APIConfig:
-    API_FOOTBALL_KEY: str = field(default_factory=lambda: _require_env("API_FOOTBALL_KEY"))
+    API_FOOTBALL_KEY: str = field(default_factory=lambda: os.getenv("API_FOOTBALL_KEY", ""))
     API_FOOTBALL_BASE: str = "https://v3.football.api-sports.io"
-    ODDS_API_KEY: str = field(default_factory=lambda: _require_env("ODDS_API_KEY"))
+    ODDS_API_KEY: str = field(default_factory=lambda: os.getenv("ODDS_API_KEY", ""))
     ODDS_API_BASE: str = "https://api.the-odds-api.com/v4"
-    OPENWEATHER_KEY: str = field(default_factory=lambda: _require_env("OPENWEATHER_KEY"))
+    OPENWEATHER_KEY: str = field(default_factory=lambda: os.getenv("OPENWEATHER_KEY", ""))
     OPENWEATHER_BASE: str = "https://api.openweathermap.org/data/2.5"
     SUPABASE_URL: str = field(default_factory=lambda: _require_env("SUPABASE_URL"))
     SUPABASE_KEY: str = field(default_factory=lambda: _require_env("SUPABASE_KEY"))

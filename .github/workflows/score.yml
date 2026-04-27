@@ -10,9 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-      OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
@@ -25,7 +23,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - run: pip install -r requirements.txt
+      - run: pip install -e .
 
       - name: Run score logger
         run: python -m apex10.score.score

@@ -236,6 +236,23 @@ def settle_pending(db_client: Any) -> Dict[str, Any]:
                     "settled_at":         datetime.now(timezone.utc).isoformat(),
                 }).eq("id", fix["id"]).execute()
                 settled += 1
+
+                # Also upsert into matches table so rolling form data stays fresh
+                # Inference.py reads this table for form/H2H/xG — without updates
+                # it stays frozen at the last historical load date.
+                try:
+                    db_client.table("matches").upsert({
+                        "home_team":  fix["home_team"],
+                        "away_team":  fix["away_team"],
+                        "home_goals": hg,
+                        "away_goals": ag,
+                        "match_date": fix["match_date"][:10],
+                        "league":     fix["league"],
+                        "status":     "finished",
+                    }, on_conflict="home_team,away_team,match_date").execute()
+                except Exception as me:
+                    logger.warning(f"  matches upsert failed (non-critical): {me}")
+
             except Exception as e:
                 logger.error(f"  DB update failed for id {fix['id']}: {e}")
                 errors += 1

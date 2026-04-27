@@ -130,18 +130,20 @@ def settle_pending(db_client: Any) -> Dict[str, Any]:
 
     response = (
         db_client.table("upcoming_fixtures")
-        .select("id, api_match_id, league, home_team, away_team, match_date, best_bet_type, consensus_prob")
+        .select("id, api_match_id, league, home_team, away_team, match_date, best_bet_type, consensus_prob, actual_outcome")
         .lt("match_date", today_str)
-        .is_("actual_outcome", "null")
         .execute()
     )
-    pending: List[Dict[str, Any]] = response.data or []
+    all_past: List[Dict[str, Any]] = response.data or []
+
+    # Filter ungraded rows in Python — avoids supabase-py .is_() NULL filter quirks
+    pending = [row for row in all_past if row.get("actual_outcome") is None]
 
     if not pending:
-        print("✅  No pending fixtures to settle.")
+        print(f"✅  All {len(all_past)} past fixtures already settled.")
         return {"settled": 0, "skipped": 0, "errors": 0, "total": 0}
 
-    print(f"📋  Found {len(pending)} ungraded fixtures to settle...")
+    print(f"📋  Found {len(pending)} ungraded fixtures (of {len(all_past)} past) to settle...")
     settled = skipped = errors = 0
 
     for fix in pending:

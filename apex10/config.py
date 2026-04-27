@@ -19,13 +19,15 @@ APEX_ENV = os.getenv("APEX_ENV", "PAPER_TRADE").upper()
 
 @dataclass(frozen=True)
 class OddsConfig:
-    MIN_ODDS: float = 1.20
+    MIN_ODDS: float = 1.25          # Raised from 1.20 — filters out ultra-cheap bets that inflate leg count
     MAX_ODDS: float = 1.49
     TARGET_PRODUCT: float = 10.0
     MIN_EDGE: float = 0.04          # 4% minimum edge, both models
     MAX_DIVERGENCE: float = 0.10    # >10% model disagreement → drop
     MAX_DRIFT: float = 0.08         # Line movement threshold → drop
-    MAX_LEGS_PER_LEAGUE: int = 999  # Cap removed per user instruction to allow unlimited qualifying tickets
+    MAX_LEGS_PER_LEAGUE: int = 999  # Cap removed per user instruction
+    MIN_CONSENSUS_PROB: float = 0.78  # Model must be ≥78% confident to qualify
+    MAX_SAFE_LEGS: int = 8          # Cap safe ticket — don't dilute below 5% win rate
 
 
 @dataclass(frozen=True)

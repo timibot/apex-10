@@ -74,14 +74,18 @@ class Ticket:
 
 def _sort_candidates(candidates: list[Candidate]) -> list[Candidate]:
     """
-    Sort by:
-      1. Model Probability DESC
-      2. Tier rank ASC (S=0 first)
-      3. Odds DESC
+    Sort by Expected Value (EV = consensus_prob * odds - 1) descending.
+    EV-first naturally picks higher-value legs, reducing the number of legs
+    needed to reach 10x combined odds vs sorting by pure probability.
+    Ties broken by tier rank then probability.
     """
     return sorted(
         candidates,
-        key=lambda c: (-c.consensus_prob, TIER_RANK.get(c.tier, 3), -c.odds),
+        key=lambda c: (
+            -(c.consensus_prob * c.odds - 1.0),  # EV DESC
+            TIER_RANK.get(c.tier, 3),             # Tier ASC (S first)
+            -c.consensus_prob,                    # Prob DESC as tiebreak
+        ),
     )
 
 
@@ -152,8 +156,8 @@ def build_tickets(qualified: list[Candidate]) -> tuple[Ticket, Ticket]:
         master_legs.append(leg)
         master_product = master_product * c.odds
         
-        # Build precision 10x target slip
-        if not safe_target_hit:
+        # Build precision 10x target slip (capped at MAX_SAFE_LEGS)
+        if not safe_target_hit and len(safe_legs) < ODDS.MAX_SAFE_LEGS:
             safe_legs.append(leg)
             safe_product = safe_product * c.odds
             if safe_product >= ODDS.TARGET_PRODUCT:

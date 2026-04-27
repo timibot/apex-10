@@ -84,18 +84,28 @@ class GateResult:
 
 
 def gate_1_odds_range(c: Candidate) -> GateResult:
-    """Gate 1: Odds must be in acceptable accumulator range."""
+    """Gate 1: Odds must be in acceptable range AND model confidence must be >= MIN_CONSENSUS_PROB."""
     min_odds = ODDS.MIN_ODDS
     max_odds = ODDS.MAX_ODDS
-    passed = min_odds <= c.odds <= max_odds
-    return GateResult(
-        passed=passed,
-        gate=1,
-        gate_name="odds_range",
-        reason="" if passed else (
-            f"Odds {c.odds} outside [{min_odds}, {max_odds}]"
-        ),
-    )
+    min_prob = ODDS.MIN_CONSENSUS_PROB
+
+    if not (min_odds <= c.odds <= max_odds):
+        return GateResult(
+            passed=False,
+            gate=1,
+            gate_name="odds_range",
+            reason=f"Odds {c.odds} outside [{min_odds}, {max_odds}]",
+        )
+
+    if c.consensus_prob < min_prob:
+        return GateResult(
+            passed=False,
+            gate=1,
+            gate_name="odds_range",
+            reason=f"Consensus prob {c.consensus_prob:.3f} < {min_prob} minimum",
+        )
+
+    return GateResult(passed=True, gate=1, gate_name="odds_range")
 
 
 def gate_2_confidence(c: Candidate) -> GateResult:
